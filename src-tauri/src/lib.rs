@@ -182,7 +182,7 @@ pub fn run() {
             // Forward connection status events to frontend
             let mut conn_rx = conn_manager.subscribe();
             let handle_conn = app_handle.clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 while let Ok(event) = conn_rx.recv().await {
                     let _ = handle_conn.emit("connection-status-changed", event);
                 }
@@ -192,7 +192,7 @@ pub fn run() {
             let mut notif_rx = notif_engine.subscribe();
             let handle_notif = app_handle.clone();
             let db_ref = Arc::clone(&database);
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 while let Ok(item) = notif_rx.recv().await {
                     let _ = db_ref.insert_notification(&item);
                     let _ = handle_notif.emit("notification-received", &item);
