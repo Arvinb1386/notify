@@ -48,16 +48,21 @@ export const PairingWizard: React.FC = () => {
 
     try {
       const res = await tauriApi.pairDevice(host.trim(), parseInt(port), code.trim());
-      setStatusMsg({ type: 'success', text: res });
+      setStatusMsg({ type: 'success', text: typeof res === 'string' ? res : 'Successfully paired!' });
       // Switch to connect tab after 1.5s
       setTimeout(() => {
         setActiveTab('connect');
         setStatusMsg({ type: 'info', text: 'Now enter the Connect Port from your phone.' });
       }, 1200);
     } catch (err: any) {
+      console.error('Pairing error detail:', err);
+      const message =
+        typeof err === 'string'
+          ? err
+          : err?.message || err?.code || JSON.stringify(err) || 'Pairing failed. Make sure phone and PC are on the same Wi-Fi.';
       setStatusMsg({
         type: 'error',
-        text: err?.message || 'Pairing failed. Make sure phone and PC are on the same Wi-Fi.',
+        text: message,
       });
     } finally {
       setLoading(false);
@@ -83,9 +88,14 @@ export const PairingWizard: React.FC = () => {
         setPairingModalOpen(false);
       }, 1000);
     } catch (err: any) {
+      console.error('Connection error detail:', err);
+      const message =
+        typeof err === 'string'
+          ? err
+          : err?.message || err?.code || JSON.stringify(err) || 'Connection failed. Verify the IP and port.';
       setStatusMsg({
         type: 'error',
-        text: err?.message || 'Connection failed. Verify the IP and port.',
+        text: message,
       });
     } finally {
       setLoading(false);
