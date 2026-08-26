@@ -12,6 +12,9 @@ import {
   ChevronUp,
 } from 'lucide-react';
 import { useNotificationStore } from '../../stores/notificationStore';
+import { AppIcon } from './AppIcon';
+import { GlassContextMenu } from './GlassContextMenu';
+import { NotificationItem } from '../../types';
 
 export const NotificationsFeed: React.FC = () => {
   const {
@@ -31,6 +34,21 @@ export const NotificationsFeed: React.FC = () => {
   } = useNotificationStore();
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Custom Glass Context Menu State
+  const [contextMenu, setContextMenu] = useState<{
+    visible: boolean;
+    x: number;
+    y: number;
+    selectedText: string;
+    item: NotificationItem | null;
+  }>({
+    visible: false,
+    x: 0,
+    y: 0,
+    selectedText: '',
+    item: null,
+  });
 
   // Extract unique apps and sort alphabetically
   const appFilters = useMemo(() => {
@@ -69,20 +87,20 @@ export const NotificationsFeed: React.FC = () => {
     });
   };
 
-  const getAppColor = (pkg: string) => {
-    if (pkg.includes('telegram') || pkg.includes('turbo') || pkg.includes('ellipi')) return 'text-sky-400 bg-sky-500/10 border-sky-500/20';
-    if (pkg.includes('whatsapp')) return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20';
-    if (pkg.includes('instagram')) return 'text-pink-400 bg-pink-500/10 border-pink-500/20';
-    if (pkg.includes('eitaa')) return 'text-amber-400 bg-amber-500/10 border-amber-500/20';
-    if (pkg.includes('bale')) return 'text-teal-400 bg-teal-500/10 border-teal-500/20';
-    if (pkg.includes('messaging') || pkg.includes('sms')) return 'text-indigo-400 bg-indigo-500/10 border-indigo-500/20';
-    if (pkg.includes('bank') || pkg.includes('blu')) return 'text-blue-400 bg-blue-500/10 border-blue-500/20';
-    if (pkg.includes('digikala')) return 'text-red-400 bg-red-500/10 border-red-500/20';
-    return 'text-gray-300 bg-gray-500/10 border-gray-500/20';
+  const handleContextMenu = (e: React.MouseEvent, item: NotificationItem) => {
+    e.preventDefault();
+    const selection = window.getSelection()?.toString() || '';
+    setContextMenu({
+      visible: true,
+      x: e.clientX,
+      y: e.clientY,
+      selectedText: selection,
+      item,
+    });
   };
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-4 relative">
       {/* Search & Global Filter Bar */}
       <div className="flex items-center justify-between gap-2.5">
         <div className="relative flex-1">
@@ -176,6 +194,7 @@ export const NotificationsFeed: React.FC = () => {
             return (
               <div
                 key={item.id}
+                onContextMenu={(e) => handleContextMenu(e, item)}
                 className={`bg-[#181a20] border rounded-2xl p-4 flex flex-col gap-2.5 transition relative overflow-hidden shadow-xs hover:border-[#3a3e4e] ${
                   item.is_otp
                     ? 'border-indigo-500/40 bg-gradient-to-r from-indigo-950/25 via-[#181a20] to-[#181a20]'
@@ -184,19 +203,13 @@ export const NotificationsFeed: React.FC = () => {
               >
                 {/* Header info */}
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <div
-                      className={`w-7 h-7 rounded-lg border flex items-center justify-center text-xs font-bold ${getAppColor(
-                        item.package_name
-                      )}`}
-                    >
-                      {item.app_name ? item.app_name[0].toUpperCase() : 'A'}
-                    </div>
+                  <div className="flex items-center gap-3">
+                    <AppIcon packageName={item.package_name} appName={item.app_name} size={30} />
                     <div className="flex flex-col">
                       <span className="text-xs font-bold text-white leading-none">
                         {item.app_name || item.package_name}
                       </span>
-                      <span className="text-[10px] text-gray-500 font-mono mt-0.5">
+                      <span className="text-[10px] text-gray-500 font-mono mt-1">
                         {item.package_name}
                       </span>
                     </div>
@@ -215,14 +228,14 @@ export const NotificationsFeed: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Body Content */}
-                <div className="flex flex-col gap-1 mt-0.5">
+                {/* Body Content (Selectable text) */}
+                <div className="flex flex-col gap-1 mt-0.5 select-text cursor-text">
                   {item.title && (
-                    <h4 className="text-xs font-semibold text-gray-100">{item.title}</h4>
+                    <h4 className="text-xs font-semibold text-gray-100 select-text">{item.title}</h4>
                   )}
                   {item.body && (
                     <p
-                      className={`text-xs text-gray-300 leading-relaxed whitespace-pre-wrap ${
+                      className={`text-xs text-gray-300 leading-relaxed whitespace-pre-wrap select-text ${
                         !isExpanded && item.body.length > 200 ? 'line-clamp-3' : ''
                       }`}
                     >
@@ -230,18 +243,18 @@ export const NotificationsFeed: React.FC = () => {
                     </p>
                   )}
                   {item.subtext && (
-                    <span className="text-[11px] text-gray-400 font-medium">{item.subtext}</span>
+                    <span className="text-[11px] text-gray-400 font-medium select-text">{item.subtext}</span>
                   )}
                 </div>
 
                 {/* 1-Click OTP Action Banner */}
                 {item.is_otp && item.otp_code && (
-                  <div className="mt-1 bg-gradient-to-r from-indigo-950/60 to-purple-950/40 border border-indigo-500/30 rounded-xl p-3 flex items-center justify-between shadow-inner">
+                  <div className="mt-1 bg-gradient-to-r from-indigo-950/60 to-purple-950/40 border border-indigo-500/30 rounded-xl p-3 flex items-center justify-between shadow-inner select-none">
                     <div className="flex items-center gap-2.5">
                       <Sparkles size={16} className="text-amber-400 animate-pulse" />
                       <div className="flex flex-col">
                         <span className="text-[11px] font-medium text-gray-300">Detected Security Code</span>
-                        <span className="font-mono text-base font-extrabold text-white tracking-widest mt-0.5">
+                        <span className="font-mono text-base font-extrabold text-white tracking-widest mt-0.5 select-text cursor-text">
                           {item.otp_code}
                         </span>
                       </div>
@@ -269,7 +282,7 @@ export const NotificationsFeed: React.FC = () => {
                 )}
 
                 {/* Card Footer Quick Actions */}
-                <div className="flex items-center justify-between border-t border-[#262933]/60 pt-2.5 mt-1 text-[11px] text-gray-400">
+                <div className="flex items-center justify-between border-t border-[#262933]/60 pt-2.5 mt-1 text-[11px] text-gray-400 select-none">
                   <div className="flex items-center gap-2">
                     {/* Copy entire notification text */}
                     <button
@@ -319,6 +332,37 @@ export const NotificationsFeed: React.FC = () => {
             );
           })}
         </div>
+      )}
+
+      {/* Glassmorphic Context Menu */}
+      {contextMenu.visible && contextMenu.item && (
+        <GlassContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          selectedText={contextMenu.selectedText}
+          isOtp={contextMenu.item.is_otp}
+          otpCode={contextMenu.item.otp_code}
+          onCopyOtp={(code) => copyOtp(code)}
+          onCopyText={() => {
+            if (contextMenu.selectedText) {
+              navigator.clipboard.writeText(contextMenu.selectedText);
+            }
+          }}
+          onCopyFullNotification={() => {
+            const content = [
+              contextMenu.item?.title,
+              contextMenu.item?.body,
+              contextMenu.item?.subtext,
+            ]
+              .filter(Boolean)
+              .join('\n');
+            copyNotificationText(contextMenu.item!.id, content);
+          }}
+          onDeleteNotification={() => {
+            deleteNotification(contextMenu.item!.id);
+          }}
+          onClose={() => setContextMenu({ ...contextMenu, visible: false })}
+        />
       )}
     </div>
   );

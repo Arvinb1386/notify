@@ -56,6 +56,7 @@ impl DumpsysParser {
     /// Parses raw output from `adb shell dumpsys notification --noredact`
     pub fn parse_snapshot(dumpsys_output: &str) -> Vec<NotificationItem> {
         let mut items = Vec::new();
+        let mut seen_content_keys = std::collections::HashSet::new();
 
         // Split output by NotificationRecord boundaries
         let record_chunks: Vec<&str> = dumpsys_output.split("NotificationRecord(").collect();
@@ -86,6 +87,14 @@ impl DumpsysParser {
                 && (full_chunk.contains("Wireless debugging") || full_chunk.contains("USB debugging") || full_chunk.contains("ZEN_ONGOING"))
             {
                 continue;
+            }
+
+            // Skip Android group summary container notifications (flags=0x200 or FLAG_GROUP_SUMMARY or groupKey summary headers with id=1)
+            // Telegram/TurboTel/WhatsApp post both a group summary header AND individual chat records with exact same text.
+            if full_chunk.contains("flags=0x211") || full_chunk.contains("flags=0x210") || full_chunk.contains("FLAG_GROUP_SUMMARY") {
+                if full_chunk.contains("groupKey=") && !full_chunk.contains("shortcut=") && (notif_id == "1" || notif_id == "-1") {
+                    continue;
+                }
             }
 
             let title = TITLE_REGEX.captures(&full_chunk).and_then(|c| {
@@ -132,6 +141,13 @@ impl DumpsysParser {
                 .and_then(|c| c.get(1))
                 .map(|m| m.as_str().to_string());
 
+            // Deduplicate exact content from the same app arriving in the exact same dumpsys snapshot
+            let content_key = format!("{}:{}:{}", pkg, title.as_deref().unwrap_or(""), body.as_deref().unwrap_or(""));
+            if seen_content_keys.contains(&content_key) {
+                continue;
+            }
+            seen_content_keys.insert(content_key);
+
             let id = format!("{}_{}_{}_{}", pkg, user_id, notif_id, tag);
             let app_name = Self::resolve_app_name(&pkg);
 
@@ -142,7 +158,7 @@ impl DumpsysParser {
                 None => (false, None),
             };
 
-            // Compute unique fingerprint incorporating body and post_time to capture message updates
+            // Compute unique fingerprint
             let mut hasher = Sha256::new();
             hasher.update(format!("{}:{}:{}:{}", pkg, title.as_deref().unwrap_or(""), body.as_deref().unwrap_or(""), post_time));
             let fingerprint = format!("{:x}", hasher.finalize());
@@ -168,9 +184,6 @@ impl DumpsysParser {
 
     /// Formats a package name into a human-readable clean App Name fallback
     pub fn clean_package_fallback(pkg: &str) -> String {
-        // Example: com.google.android.apps.messaging -> Messages
-        // Example: ellipi.messenger -> TurboTel / Messenger
-        // Example: ru.zdevs.zarchiver -> Zarchiver
         let parts: Vec<&str> = pkg.split('.').collect();
         let last = parts.last().unwrap_or(&pkg);
 
@@ -272,7 +285,6 @@ impl DumpsysParser {
         if let Some(&name) = map.get(pkg) {
             Some(name.to_string())
         } else {
-            // Intelligent fallback: convert package like 'org.readera' -> 'Readera'
             Some(Self::clean_package_fallback(pkg))
         }
     }
