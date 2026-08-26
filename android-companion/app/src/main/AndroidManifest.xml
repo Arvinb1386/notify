@@ -13,9 +13,9 @@
 
     <application
         android:allowBackup="true"
-        android:icon="@android:drawable/ic_dialog_info"
+        android:icon="@drawable/ic_launcher"
         android:label="Notify Companion"
-        android:roundIcon="@android:drawable/ic_dialog_info"
+        android:roundIcon="@drawable/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.NotifyCompanion"
         android:usesCleartextTraffic="true">

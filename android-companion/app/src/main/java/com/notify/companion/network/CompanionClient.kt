@@ -15,20 +15,38 @@ import java.util.concurrent.TimeUnit
 
 class CompanionClient(private val context: Context) {
 
+    companion object {
+        @Volatile
+        var sharedClient: CompanionClient? = null
+
+        fun getInstance(context: Context): CompanionClient {
+            return sharedClient ?: synchronized(this) {
+                sharedClient ?: CompanionClient(context.applicationContext).also {
+                    sharedClient = it
+                }
+            }
+        }
+    }
+
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
-        .pingInterval(10, TimeUnit.SECONDS)
+        .pingInterval(8, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     private var webSocket: WebSocket? = null
     var isConnected = false
         private set
 
+    var currentServerAddress: String? = null
+        private set
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
 
     var onQuickReplyReceived: ((key: String, text: String) -> Unit)? = null
-    var onConnectionStateChanged: ((Boolean) -> Unit)? = null
+    var onConnectionStateChanged: ((Boolean, String?) -> Unit)? = null
+    var onDiscoveryFound: ((String, Int, String) -> Unit)? = null
 
     private val sharedPrefs = context.getSharedPreferences("notify_companion_prefs", Context.MODE_PRIVATE)
 
@@ -39,30 +57,47 @@ class CompanionClient(private val context: Context) {
                     val savedIp = sharedPrefs.getString("server_ip", null)
                     val savedPort = sharedPrefs.getInt("server_port", 27890)
 
-                    if (savedIp != null) {
-                        Log.d("CompanionClient", "Attempting connection to $savedIp:$savedPort")
-                        connectToWebSocket(savedIp, savedPort)
-                    } else {
-                        // Scan network via UDP broadcast beacon
-                        Log.d("CompanionClient", "No saved IP. Broadcasting UDP discovery...")
-                        val discovered = discoverServerViaUdp()
-                        if (discovered != null) {
-                            val (ip, port) = discovered
-                            sharedPrefs.edit().putString("server_ip", ip).putInt("server_port", port).apply()
-                            connectToWebSocket(ip, port)
+                    // 1. Try UDP broadcast auto-discovery first
+                    Log.d("CompanionClient", "Searching local Wi-Fi via UDP Discovery...")
+                    val discovered = discoverServerViaUdp()
+                    if (discovered != null) {
+                        val (ip, port, name) = discovered
+                        Log.i("CompanionClient", "Auto-discovered Notify PC: $name at $ip:$port")
+                        mainHandler.post {
+                            onDiscoveryFound?.invoke(ip, port, name)
                         }
+                        sharedPrefs.edit().putString("server_ip", ip).putInt("server_port", port).apply()
+                        connectToWebSocket(ip, port)
+                    } else if (!savedIp.isNullOrBlank()) {
+                        // 2. Fallback to saved IP
+                        Log.d("CompanionClient", "Connecting to saved IP $savedIp:$savedPort")
+                        connectToWebSocket(savedIp, savedPort)
                     }
                 }
-                delay(5000)
+                delay(4000)
             }
         }
     }
 
-    private suspend fun discoverServerViaUdp(): Pair<String, Int>? = withContext(Dispatchers.IO) {
+    fun triggerQuickDiscovery() {
+        scope.launch {
+            val discovered = discoverServerViaUdp()
+            if (discovered != null) {
+                val (ip, port, name) = discovered
+                mainHandler.post {
+                    onDiscoveryFound?.invoke(ip, port, name)
+                }
+                connectWithQrData(ip, port, "")
+            }
+        }
+    }
+
+    private suspend fun discoverServerViaUdp(): Triple<String, Int, String>? = withContext(Dispatchers.IO) {
+        var socket: DatagramSocket? = null
         try {
-            val socket = DatagramSocket()
+            socket = DatagramSocket()
             socket.broadcast = true
-            socket.soTimeout = 2000
+            socket.soTimeout = 1500
 
             val sendData = "NOTIFY_DISCOVER".toByteArray()
             val broadcastAddr = InetAddress.getByName("255.255.255.255")
@@ -73,19 +108,23 @@ class CompanionClient(private val context: Context) {
             val receivePacket = DatagramPacket(receiveBuf, receiveBuf.size)
             socket.receive(receivePacket)
 
-            val response = String(receivePacket.data, 0, receivePacket.length)
-            socket.close()
+            val response = String(receivePacket.data, 0, receivePacket.length).trim()
 
             if (response.startsWith("NOTIFY_SERVER")) {
                 val parts = response.split("|")
                 if (parts.size >= 3) {
                     val ip = parts[1]
                     val port = parts[2].toIntOrNull() ?: 27890
-                    return@withContext Pair(ip, port)
+                    val name = if (parts.size >= 4) parts[3] else "Notify PC"
+                    return@withContext Triple(ip, port, name)
                 }
             }
         } catch (e: Exception) {
             Log.d("CompanionClient", "UDP discovery timeout or error: ${e.message}")
+        } finally {
+            try {
+                socket?.close()
+            } catch (_: Exception) {}
         }
         return@withContext null
     }
@@ -97,21 +136,26 @@ class CompanionClient(private val context: Context) {
             .putString("pairing_secret", secret)
             .apply()
 
-        connectToWebSocket(ip, port)
+        scope.launch {
+            connectToWebSocket(ip, port)
+        }
     }
 
     private fun connectToWebSocket(ip: String, port: Int) {
         try {
+            webSocket?.cancel()
             val request = Request.Builder()
                 .url("ws://$ip:$port")
                 .build()
+
+            currentServerAddress = "$ip:$port"
 
             webSocket = client.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(ws: WebSocket, response: Response) {
                     Log.i("CompanionClient", "WebSocket Connected to $ip:$port")
                     isConnected = true
                     mainHandler.post {
-                        onConnectionStateChanged?.invoke(true)
+                        onConnectionStateChanged?.invoke(true, "$ip:$port")
                     }
 
                     // Send Handshake
@@ -150,7 +194,7 @@ class CompanionClient(private val context: Context) {
                     Log.w("CompanionClient", "WebSocket Closed: $reason")
                     isConnected = false
                     mainHandler.post {
-                        onConnectionStateChanged?.invoke(false)
+                        onConnectionStateChanged?.invoke(false, null)
                     }
                 }
 
@@ -158,7 +202,7 @@ class CompanionClient(private val context: Context) {
                     Log.e("CompanionClient", "WebSocket Failure: ${t.message}")
                     isConnected = false
                     mainHandler.post {
-                        onConnectionStateChanged?.invoke(false)
+                        onConnectionStateChanged?.invoke(false, null)
                     }
                 }
             })
@@ -166,7 +210,7 @@ class CompanionClient(private val context: Context) {
             Log.e("CompanionClient", "Failed to connect WebSocket", e)
             isConnected = false
             mainHandler.post {
-                onConnectionStateChanged?.invoke(false)
+                onConnectionStateChanged?.invoke(false, null)
             }
         }
     }

@@ -20,7 +20,7 @@ import kotlinx.coroutines.*
 class CompanionBackgroundService : Service() {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var companionClient: CompanionClient? = null
+    private lateinit var companionClient: CompanionClient
 
     override fun onCreate() {
         super.onCreate()
@@ -31,9 +31,8 @@ class CompanionBackgroundService : Service() {
         }
 
         try {
-            companionClient = CompanionClient(applicationContext)
-            companionClient?.startAutoConnection()
-            NotificationCollectorService.companionClient = companionClient
+            companionClient = CompanionClient.getInstance(applicationContext)
+            companionClient.startAutoConnection()
         } catch (e: Exception) {
             Log.e("CompanionService", "Client start error", e)
         }
@@ -46,7 +45,7 @@ class CompanionBackgroundService : Service() {
                 } catch (e: Exception) {
                     Log.e("CompanionService", "Telemetry error", e)
                 }
-                delay(5000)
+                delay(4000)
             }
         }
     }
@@ -74,7 +73,7 @@ class CompanionBackgroundService : Service() {
             wifiSignal = -50
         )
 
-        companionClient?.sendMessage(telemetry.toJson())
+        companionClient.sendMessage(telemetry.toJson())
     }
 
     private fun startForegroundNotification() {

@@ -1,8 +1,6 @@
 package com.notify.companion.service
 
 import android.app.Notification
-import android.content.Intent
-import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -11,24 +9,13 @@ import com.notify.companion.network.CompanionMessage
 
 class NotificationCollectorService : NotificationListenerService() {
 
-    companion object {
-        var instance: NotificationCollectorService? = null
-        var companionClient: CompanionClient? = null
-    }
+    private lateinit var companionClient: CompanionClient
 
     override fun onCreate() {
         super.onCreate()
-        instance = this
-        if (companionClient == null) {
-            companionClient = CompanionClient(applicationContext)
-            companionClient?.startAutoConnection()
-        }
+        companionClient = CompanionClient.getInstance(applicationContext)
+        companionClient.startAutoConnection()
         Log.i("NotificationCollector", "Notification Listener Service Started")
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        instance = null
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -36,7 +23,7 @@ class NotificationCollectorService : NotificationListenerService() {
 
         val pkg = sbn.packageName ?: return
         val notif = sbn.notification ?: return
-        val extras: Bundle = notif.extras ?: return
+        val extras = notif.extras ?: return
 
         // Skip system ongoing notifications
         if ((notif.flags and Notification.FLAG_ONGOING_EVENT) != 0 && (pkg == "android" || pkg == "com.android.systemui")) {
@@ -75,7 +62,7 @@ class NotificationCollectorService : NotificationListenerService() {
         )
 
         Log.d("NotificationCollector", "Sending notification from $appName: $title")
-        companionClient?.sendMessage(msg.toJson())
+        companionClient.sendMessage(msg.toJson())
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
@@ -84,6 +71,6 @@ class NotificationCollectorService : NotificationListenerService() {
         val key = sbn.key ?: "${pkg}_${sbn.id}"
 
         val msg = CompanionMessage.NotificationRemoved(key, pkg)
-        companionClient?.sendMessage(msg.toJson())
+        companionClient.sendMessage(msg.toJson())
     }
 }
