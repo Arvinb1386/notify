@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { DeviceInfo, ConnectionState, DeviceTelemetry, DeviceCapabilities } from '../types';
+import { DeviceInfo, ConnectionState, DeviceTelemetry, DeviceCapabilities, SavedDevice } from '../types';
 import { tauriApi } from '../lib/ipc';
 
 interface DeviceStoreState {
@@ -8,6 +8,7 @@ interface DeviceStoreState {
   statusMessage: string | null;
   telemetry: DeviceTelemetry | null;
   capabilities: DeviceCapabilities | null;
+  savedDevices: SavedDevice[];
   isPairingModalOpen: boolean;
 
   setConnectionState: (state: ConnectionState, msg?: string | null) => void;
@@ -18,6 +19,9 @@ interface DeviceStoreState {
 
   initConnectionListeners: () => Promise<() => void>;
   fetchTelemetry: () => Promise<void>;
+  loadSavedDevices: () => Promise<void>;
+  connectSavedDevice: (serial: string) => Promise<void>;
+  deleteSavedDevice: (serial: string) => Promise<void>;
   disconnect: () => Promise<void>;
 }
 
@@ -27,6 +31,7 @@ export const useDeviceStore = create<DeviceStoreState>((set, get) => ({
   statusMessage: null,
   telemetry: null,
   capabilities: null,
+  savedDevices: [],
   isPairingModalOpen: false,
 
   setConnectionState: (connectionState, statusMessage) =>
@@ -36,7 +41,38 @@ export const useDeviceStore = create<DeviceStoreState>((set, get) => ({
   setCapabilities: (capabilities) => set({ capabilities }),
   setPairingModalOpen: (isPairingModalOpen) => set({ isPairingModalOpen }),
 
+  loadSavedDevices: async () => {
+    try {
+      const list = await tauriApi.getSavedDevices();
+      set({ savedDevices: list });
+    } catch (e) {
+      console.debug('Failed to load saved devices:', e);
+    }
+  },
+
+  connectSavedDevice: async (serial: string) => {
+    set({ connectionState: 'connecting', statusMessage: `Connecting to ${serial}...` });
+    try {
+      const dev = await tauriApi.connectBySerial(serial);
+      set({ activeDevice: dev, connectionState: 'connected', statusMessage: null });
+      get().loadSavedDevices();
+      get().fetchTelemetry();
+    } catch (e: any) {
+      set({ connectionState: 'disconnected', statusMessage: e?.message || 'Connection failed' });
+    }
+  },
+
+  deleteSavedDevice: async (serial: string) => {
+    try {
+      await tauriApi.deleteSavedDevice(serial);
+      get().loadSavedDevices();
+    } catch (e) {
+      console.error('Delete saved device error:', e);
+    }
+  },
+
   initConnectionListeners: async () => {
+    get().loadSavedDevices();
     // Initial fetch
     try {
       const state = await tauriApi.getConnectionState();
@@ -57,6 +93,7 @@ export const useDeviceStore = create<DeviceStoreState>((set, get) => ({
       });
 
       if (event.state === 'connected' && event.device) {
+        get().loadSavedDevices();
         get().fetchTelemetry();
       } else if (event.state === 'disconnected') {
         set({ telemetry: null, capabilities: null });

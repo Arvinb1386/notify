@@ -52,8 +52,42 @@ async fn connect_device(
     state: State<'_, AppState>,
 ) -> Result<DeviceInfo, AppError> {
     let dev = state.connection_manager.connect(&host, port).await?;
+    let _ = state.database.save_device(&dev);
     let _ = state.notification_engine.start_monitoring(dev.serial.clone()).await;
     Ok(dev)
+}
+
+#[tauri::command]
+async fn connect_by_serial(
+    serial: String,
+    state: State<'_, AppState>,
+) -> Result<DeviceInfo, AppError> {
+    // If serial contains host:port
+    if let Some((host, port_str)) = serial.rsplit_once(':') {
+        if let Ok(port) = port_str.parse::<u16>() {
+            let dev = state.connection_manager.connect(host, port).await?;
+            let _ = state.database.save_device(&dev);
+            let _ = state.notification_engine.start_monitoring(dev.serial.clone()).await;
+            return Ok(dev);
+        }
+    }
+
+    // Direct adb attach if already paired/connected
+    let dev = AdbCommands::get_device_info(&state.adb_client, &serial).await?;
+    let _ = state.connection_manager.connect_existing(dev.clone()).await;
+    let _ = state.database.save_device(&dev);
+    let _ = state.notification_engine.start_monitoring(serial).await;
+    Ok(dev)
+}
+
+#[tauri::command]
+async fn get_saved_devices(state: State<'_, AppState>) -> Result<Vec<storage::SavedDevice>, AppError> {
+    state.database.get_saved_devices()
+}
+
+#[tauri::command]
+async fn delete_saved_device(serial: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    state.database.delete_saved_device(&serial)
 }
 
 #[tauri::command]
@@ -269,6 +303,9 @@ pub fn run() {
             check_adb_status,
             pair_device,
             connect_device,
+            connect_by_serial,
+            get_saved_devices,
+            delete_saved_device,
             disconnect_device,
             get_connection_state,
             get_active_device,

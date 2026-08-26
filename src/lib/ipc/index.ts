@@ -85,6 +85,12 @@ export const tauriApi = {
     safeInvoke('pair_device', { host, port, code }),
   connectDevice: (host: string, port: number): Promise<DeviceInfo> =>
     safeInvoke('connect_device', { host, port }),
+  connectBySerial: (serial: string): Promise<DeviceInfo> =>
+    safeInvoke('connect_by_serial', { serial }),
+  getSavedDevices: (): Promise<import('../../types').SavedDevice[]> =>
+    safeInvoke('get_saved_devices'),
+  deleteSavedDevice: (serial: string): Promise<void> =>
+    safeInvoke('delete_saved_device', { serial }),
   disconnectDevice: (): Promise<void> => safeInvoke('disconnect_device'),
   getConnectionState: (): Promise<ConnectionState> => safeInvoke('get_connection_state'),
   getActiveDevice: (): Promise<DeviceInfo | null> => safeInvoke('get_active_device'),

@@ -5,21 +5,24 @@ import {
   Activity,
   Radio,
   Plus,
+  Layers,
 } from 'lucide-react';
 import { useDeviceStore } from './stores/deviceStore';
 import { useNotificationStore } from './stores/notificationStore';
 import { DeviceCard } from './components/dashboard/DeviceCard';
+import { DevicesTab } from './components/dashboard/DevicesTab';
 import { NotificationsFeed } from './components/notifications/NotificationsFeed';
 import { PairingWizard } from './components/pairing/PairingWizard';
 import { tauriApi } from './lib/ipc';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'notifications' | 'diagnostics'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'devices' | 'notifications' | 'diagnostics'>('dashboard');
   const [adbVersion, setAdbVersion] = useState<string>('Detecting...');
 
   const {
     activeDevice,
     connectionState,
+    savedDevices,
     initConnectionListeners,
     setPairingModalOpen,
   } = useDeviceStore();
@@ -131,6 +134,25 @@ export function App() {
             </button>
 
             <button
+              onClick={() => setActiveTab('devices')}
+              className={`w-full px-3 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between transition cursor-pointer ${
+                activeTab === 'devices'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-[#1c1e27]'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <Layers size={16} />
+                <span>Devices</span>
+              </div>
+              {savedDevices.length > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-white/10 text-gray-300">
+                  {savedDevices.length}
+                </span>
+              )}
+            </button>
+
+            <button
               onClick={() => setActiveTab('notifications')}
               className={`w-full px-3 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between transition cursor-pointer ${
                 activeTab === 'notifications'
@@ -176,6 +198,7 @@ export function App() {
         <main className="flex-1 overflow-y-auto p-6 bg-[#0f1117]">
           <div className="max-w-3xl mx-auto flex flex-col gap-6">
             {activeTab === 'dashboard' && <DeviceCard />}
+            {activeTab === 'devices' && <DevicesTab />}
             {activeTab === 'notifications' && <NotificationsFeed />}
             {activeTab === 'diagnostics' && (
               <div className="bg-[#181a20] border border-[#262933] rounded-2xl p-6 flex flex-col gap-4">

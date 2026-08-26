@@ -51,6 +51,14 @@ export interface DiscoveredService {
   port: number;
 }
 
+export interface SavedDevice {
+  serial: string;
+  model: string;
+  manufacturer: string;
+  android_version: string;
+  last_connected: number;
+}
+
 export interface DeviceCapabilities {
   supports_volume: boolean;
   supports_media: boolean;
