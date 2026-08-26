@@ -118,6 +118,8 @@ export const tauriApi = {
   // Notification Storage
   getNotificationHistory: (limit?: number): Promise<NotificationItem[]> =>
     safeInvoke('get_notification_history', { limit }),
+  deleteNotification: (id: string): Promise<void> =>
+    safeInvoke('delete_notification', { id }),
   clearNotificationHistory: (): Promise<void> => safeInvoke('clear_notification_history'),
 
   // Event Listeners

@@ -6,11 +6,16 @@ interface NotificationStoreState {
   notifications: NotificationItem[];
   searchQuery: string;
   selectedPackage: string | null;
+  filterOtpOnly: boolean;
   copiedOtp: string | null;
+  copiedId: string | null;
 
   setSearchQuery: (query: string) => void;
   setSelectedPackage: (pkg: string | null) => void;
+  setFilterOtpOnly: (val: boolean) => void;
   copyOtp: (code: string) => Promise<void>;
+  copyNotificationText: (id: string, text: string) => Promise<void>;
+  deleteNotification: (id: string) => Promise<void>;
   addNotification: (item: NotificationItem) => void;
   loadHistory: () => Promise<void>;
   clearHistory: () => Promise<void>;
@@ -21,10 +26,13 @@ export const useNotificationStore = create<NotificationStoreState>((set, get) =>
   notifications: [],
   searchQuery: '',
   selectedPackage: null,
+  filterOtpOnly: false,
   copiedOtp: null,
+  copiedId: null,
 
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSelectedPackage: (selectedPackage) => set({ selectedPackage }),
+  setFilterOtpOnly: (filterOtpOnly) => set({ filterOtpOnly }),
 
   copyOtp: async (code: string) => {
     try {
@@ -37,6 +45,31 @@ export const useNotificationStore = create<NotificationStoreState>((set, get) =>
       }, 3000);
     } catch (e) {
       console.error('Failed to copy OTP:', e);
+    }
+  },
+
+  copyNotificationText: async (id: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      set({ copiedId: id });
+      setTimeout(() => {
+        if (get().copiedId === id) {
+          set({ copiedId: null });
+        }
+      }, 2000);
+    } catch (e) {
+      console.error('Failed to copy text:', e);
+    }
+  },
+
+  deleteNotification: async (id: string) => {
+    try {
+      await tauriApi.deleteNotification(id);
+      set((state) => ({
+        notifications: state.notifications.filter((n) => n.id !== id),
+      }));
+    } catch (e) {
+      console.error('Delete notification error:', e);
     }
   },
 
@@ -62,7 +95,7 @@ export const useNotificationStore = create<NotificationStoreState>((set, get) =>
 
   loadHistory: async () => {
     try {
-      const history = await tauriApi.getNotificationHistory(100);
+      const history = await tauriApi.getNotificationHistory(200);
       set({ notifications: history });
     } catch (e) {
       console.error('Failed to load history:', e);

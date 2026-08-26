@@ -153,6 +153,13 @@ impl Database {
         Ok(())
     }
 
+    pub fn delete_notification(&self, id: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM notifications WHERE id = ?1", params![id])
+            .map_err(|e| AppError::DatabaseError(format!("Delete notification failed: {}", e)))?;
+        Ok(())
+    }
+
     pub fn get_recent_notifications(&self, limit: u32) -> AppResult<Vec<NotificationItem>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn

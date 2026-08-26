@@ -167,6 +167,11 @@ async fn copy_otp_to_clipboard(code: String, ttl_secs: Option<u64>) -> Result<()
 }
 
 #[tauri::command]
+async fn delete_notification(id: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    state.database.delete_notification(&id)
+}
+
+#[tauri::command]
 async fn get_notification_history(limit: Option<u32>, state: State<'_, AppState>) -> Result<Vec<NotificationItem>, AppError> {
     state.database.get_recent_notifications(limit.unwrap_or(100))
 }
@@ -322,6 +327,7 @@ pub fn run() {
             check_capabilities,
             copy_otp_to_clipboard,
             get_notification_history,
+            delete_notification,
             clear_notification_history,
         ])
         .run(tauri::generate_context!())

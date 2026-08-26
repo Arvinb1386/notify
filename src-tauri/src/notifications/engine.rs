@@ -108,7 +108,6 @@ impl NotificationSource for LogcatSource {
 pub struct NotificationEngine {
     client: AdbClient,
     active_notifications: Arc<RwLock<std::collections::HashMap<String, NotificationItem>>>,
-    seen_fingerprints: Arc<RwLock<lru::LruCache<String, i64>>>,
     event_sender: broadcast::Sender<NotificationItem>,
     cancel_token: Arc<RwLock<Option<CancellationToken>>>,
 }
@@ -119,9 +118,6 @@ impl NotificationEngine {
         Self {
             client,
             active_notifications: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            seen_fingerprints: Arc::new(RwLock::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(500).unwrap(),
-            ))),
             event_sender: tx,
             cancel_token: Arc::new(RwLock::new(None)),
         }
@@ -142,10 +138,8 @@ impl NotificationEngine {
         let initial_items = DumpsysParser::parse_snapshot(&initial_dumpsys);
         {
             let mut active_lock = self.active_notifications.write().await;
-            let mut fp_lock = self.seen_fingerprints.write().await;
             active_lock.clear();
             for item in initial_items {
-                fp_lock.put(item.fingerprint.clone(), item.post_time);
                 active_lock.insert(item.id.clone(), item);
             }
             info!("Notification Engine seeded with {} baseline notifications", active_lock.len());
@@ -157,13 +151,12 @@ impl NotificationEngine {
 
         let client = self.client.clone();
         let active_map = Arc::clone(&self.active_notifications);
-        let fingerprints = Arc::clone(&self.seen_fingerprints);
         let event_tx = self.event_sender.clone();
         let cancel_child = cancel.clone();
 
         tokio::spawn(async move {
             info!("Notification reconciliation supervisor running for {}", serial);
-            let mut periodic_interval = tokio::time::interval(Duration::from_secs(3));
+            let mut periodic_interval = tokio::time::interval(Duration::from_secs(2));
 
             loop {
                 tokio::select! {
@@ -172,13 +165,13 @@ impl NotificationEngine {
                         break;
                     }
                     _ = periodic_interval.tick() => {
-                        Self::reconcile_state(&client, &serial, &active_map, &fingerprints, &event_tx).await;
+                        Self::reconcile_state(&client, &serial, &active_map, &event_tx).await;
                     }
                     signal_opt = signal_rx.recv() => {
                         if signal_opt.is_some() {
                             // Instant reaction with tiny debounce (50ms)
                             tokio::time::sleep(Duration::from_millis(50)).await;
-                            Self::reconcile_state(&client, &serial, &active_map, &fingerprints, &event_tx).await;
+                            Self::reconcile_state(&client, &serial, &active_map, &event_tx).await;
                         }
                     }
                 }
@@ -194,12 +187,11 @@ impl NotificationEngine {
         }
     }
 
-    /// Fetches dumpsys snapshot and computes Diff: Emits on NEW or UPDATED (e.g. 2nd incoming message in chat)
+    /// Fetches dumpsys snapshot and computes Diff: Emits on NEW or CHANGED items
     async fn reconcile_state(
         client: &AdbClient,
         serial: &str,
         active_map: &Arc<RwLock<std::collections::HashMap<String, NotificationItem>>>,
-        fingerprints: &Arc<RwLock<lru::LruCache<String, i64>>>,
         event_tx: &broadcast::Sender<NotificationItem>,
     ) {
         let raw_dumpsys = match client.shell(serial, &["dumpsys", "notification", "--noredact"]).await {
@@ -212,7 +204,6 @@ impl NotificationEngine {
 
         let current_items = DumpsysParser::parse_snapshot(&raw_dumpsys);
         let mut active_lock = active_map.write().await;
-        let mut fp_lock = fingerprints.write().await;
 
         let mut current_keys = std::collections::HashSet::new();
 
@@ -220,22 +211,21 @@ impl NotificationEngine {
             current_keys.insert(item.id.clone());
 
             let previous_item = active_lock.get(&item.id);
-            let is_duplicate_fp = fp_lock.contains(&item.fingerprint);
 
-            // If this exact content was never seen, or if the text/message has changed since last time
-            if !is_duplicate_fp {
-                fp_lock.put(item.fingerprint.clone(), item.post_time);
+            // Determine if this is a new item or if the text/body/title has updated
+            let should_emit = match previous_item {
+                None => true, // Completely new notification!
+                Some(prev) => {
+                    // Check if content or timestamp actually changed
+                    prev.body != item.body || prev.title != item.title || prev.post_time != item.post_time
+                }
+            };
 
-                let event_item = if let Some(prev) = previous_item {
-                    // Force the status to Posted when the content has meaningfully changed
-                    // so that the Windows toast logic (which checks for Posted/Updated) properly triggers it
-                    let mut fresh = item.clone();
-                    if prev.body != item.body || prev.title != item.title {
-                        fresh.status = NotificationStatus::Posted;
-                    } else {
-                        fresh.status = NotificationStatus::Updated;
-                    }
-                    fresh
+            if should_emit {
+                let event_item = if previous_item.is_some() {
+                    let mut updated = item.clone();
+                    updated.status = NotificationStatus::Posted; // Trigger Windows Toast as fresh message
+                    updated
                 } else {
                     item.clone()
                 };
