@@ -104,9 +104,38 @@ export const useDeviceStore = create<DeviceStoreState>((set, get) => ({
       set({ telemetry });
     });
 
+    const unlistenCompanionConnected = await tauriApi.onCompanionConnected((companion) => {
+      const dev: DeviceInfo = {
+        serial: `companion:${companion.device_id.slice(0, 8)}`,
+        model: `${companion.model} (Companion App)`,
+        manufacturer: companion.manufacturer,
+        android_version: companion.android_version,
+        sdk_version: "Live",
+        is_wireless: true,
+        is_connected: true,
+      };
+      set({
+        activeDevice: dev,
+        connectionState: 'connected',
+        statusMessage: 'Connected via Android Companion App',
+      });
+      get().loadSavedDevices();
+    });
+
+    const unlistenCompanionDisconnected = await tauriApi.onCompanionDisconnected(() => {
+      set({
+        activeDevice: null,
+        connectionState: 'disconnected',
+        telemetry: null,
+        statusMessage: 'Companion Disconnected',
+      });
+    });
+
     return () => {
       unlistenConn();
       unlistenTelemetry();
+      unlistenCompanionConnected();
+      unlistenCompanionDisconnected();
     };
   },
 

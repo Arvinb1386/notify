@@ -161,4 +161,24 @@ export const tauriApi = {
     }
     return () => {};
   },
+  onCompanionConnected: async (callback: (companion: import('../../types').ConnectedCompanion) => void): Promise<UnlistenFn> => {
+    try {
+      if (typeof window !== 'undefined' && (isTauri() || '__TAURI_INTERNALS__' in window)) {
+        return await listen<import('../../types').ConnectedCompanion>('companion-connected', (e) => callback(e.payload));
+      }
+    } catch (e) {
+      console.warn('Browser mode: companion listener mock active');
+    }
+    return () => {};
+  },
+  onCompanionDisconnected: async (callback: (companion: import('../../types').ConnectedCompanion) => void): Promise<UnlistenFn> => {
+    try {
+      if (typeof window !== 'undefined' && (isTauri() || '__TAURI_INTERNALS__' in window)) {
+        return await listen<import('../../types').ConnectedCompanion>('companion-disconnected', (e) => callback(e.payload));
+      }
+    } catch (e) {
+      console.warn('Browser mode: companion disconnect listener mock active');
+    }
+    return () => {};
+  },
 };

@@ -11,6 +11,7 @@ import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import com.notify.companion.network.CompanionClient
 import com.notify.companion.service.CompanionBackgroundService
+import com.notify.companion.service.NotificationCollectorService
 
 class MainActivity : AppCompatActivity() {
 
@@ -49,7 +50,7 @@ class MainActivity : AppCompatActivity() {
 
             statusText = TextView(this).apply {
                 text = "Status: Ready to connect"
-                textSize = 13f
+                textSize = 14f
                 setTextColor(0xFF818CF8.toInt())
                 setPadding(0, 0, 0, 30)
             }
@@ -83,8 +84,13 @@ class MainActivity : AppCompatActivity() {
                 setPadding(0, 30, 0, 10)
             }
 
+            val prefs = getSharedPreferences("notify_companion_prefs", Context.MODE_PRIVATE)
+            val savedIp = prefs.getString("server_ip", "") ?: ""
+            val savedPort = prefs.getInt("server_port", 27890)
+
             ipInput = EditText(this).apply {
-                hint = "PC IP (e.g. 192.168.1.5)"
+                hint = "PC IP (e.g. 192.168.1.4)"
+                setText(savedIp)
                 setHintTextColor(0xFF6B7280.toInt())
                 setTextColor(0xFFFFFFFF.toInt())
                 setBackgroundColor(0xFF181A20.toInt())
@@ -93,7 +99,7 @@ class MainActivity : AppCompatActivity() {
 
             portInput = EditText(this).apply {
                 hint = "Port (default: 27890)"
-                setText("27890")
+                setText(savedPort.toString())
                 setHintTextColor(0xFF6B7280.toInt())
                 setTextColor(0xFFFFFFFF.toInt())
                 setBackgroundColor(0xFF181A20.toInt())
@@ -108,12 +114,28 @@ class MainActivity : AppCompatActivity() {
                     val ip = ipInput.text.toString().trim()
                     val port = portInput.text.toString().trim().toIntOrNull() ?: 27890
                     if (ip.isNotEmpty()) {
-                        val client = CompanionClient(applicationContext)
+                        statusText.text = "Status: Connecting to $ip:$port..."
+                        statusText.setTextColor(0xFFF59E0B.toInt())
+
+                        var client = NotificationCollectorService.companionClient
+                        if (client == null) {
+                            client = CompanionClient(applicationContext)
+                            NotificationCollectorService.companionClient = client
+                        }
+
+                        client.onConnectionStateChanged = { isConnected ->
+                            if (isConnected) {
+                                statusText.text = "Status: ● Connected to PC"
+                                statusText.setTextColor(0xFF10B981.toInt())
+                                Toast.makeText(this@MainActivity, "Connected to PC!", Toast.LENGTH_SHORT).show()
+                            } else {
+                                statusText.text = "Status: Disconnected / Reconnecting..."
+                                statusText.setTextColor(0xFFEF4444.toInt())
+                            }
+                        }
+
                         client.connectWithQrData(ip, port, "")
                         startBackgroundService()
-                        statusText.text = "Status: Connecting to $ip:$port..."
-                        statusText.setTextColor(0xFF10B981.toInt())
-                        Toast.makeText(this@MainActivity, "Connecting to PC...", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(this@MainActivity, "Please enter PC IP address", Toast.LENGTH_SHORT).show()
                     }

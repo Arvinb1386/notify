@@ -2,6 +2,8 @@ package com.notify.companion.network
 
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.*
 import okhttp3.*
@@ -19,8 +21,11 @@ class CompanionClient(private val context: Context) {
         .build()
 
     private var webSocket: WebSocket? = null
-    private var isConnected = false
+    var isConnected = false
+        private set
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     var onQuickReplyReceived: ((key: String, text: String) -> Unit)? = null
     var onConnectionStateChanged: ((Boolean) -> Unit)? = null
@@ -48,7 +53,7 @@ class CompanionClient(private val context: Context) {
                         }
                     }
                 }
-                delay(4000)
+                delay(5000)
             }
         }
     }
@@ -105,7 +110,9 @@ class CompanionClient(private val context: Context) {
                 override fun onOpen(ws: WebSocket, response: Response) {
                     Log.i("CompanionClient", "WebSocket Connected to $ip:$port")
                     isConnected = true
-                    onConnectionStateChanged?.invoke(true)
+                    mainHandler.post {
+                        onConnectionStateChanged?.invoke(true)
+                    }
 
                     // Send Handshake
                     val deviceId = getOrCreateDeviceId()
@@ -130,7 +137,9 @@ class CompanionClient(private val context: Context) {
                         if (type == "quick_reply" && payload != null) {
                             val key = payload.getString("key")
                             val replyText = payload.getString("reply_text")
-                            onQuickReplyReceived?.invoke(key, replyText)
+                            mainHandler.post {
+                                onQuickReplyReceived?.invoke(key, replyText)
+                            }
                         }
                     } catch (e: Exception) {
                         Log.e("CompanionClient", "Error parsing server message", e)
@@ -140,18 +149,25 @@ class CompanionClient(private val context: Context) {
                 override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                     Log.w("CompanionClient", "WebSocket Closed: $reason")
                     isConnected = false
-                    onConnectionStateChanged?.invoke(false)
+                    mainHandler.post {
+                        onConnectionStateChanged?.invoke(false)
+                    }
                 }
 
                 override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                     Log.e("CompanionClient", "WebSocket Failure: ${t.message}")
                     isConnected = false
-                    onConnectionStateChanged?.invoke(false)
+                    mainHandler.post {
+                        onConnectionStateChanged?.invoke(false)
+                    }
                 }
             })
         } catch (e: Exception) {
             Log.e("CompanionClient", "Failed to connect WebSocket", e)
             isConnected = false
+            mainHandler.post {
+                onConnectionStateChanged?.invoke(false)
+            }
         }
     }
 

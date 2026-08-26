@@ -1,15 +1,13 @@
 use futures_util::{SinkExt, StreamExt};
-use local_ip_address::local_ip;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
-use super::protocol::{CompanionMessage, PairingQrData, UdpBeaconPayload};
+use super::protocol::{CompanionMessage, PairingQrData};
 use crate::notifications::dumpsys_parser::{NotificationItem, NotificationStatus};
 use crate::notifications::otp_detector::OtpDetector;
 use crate::notifications::DesktopNotifier;
@@ -50,11 +48,76 @@ impl CompanionServer {
         }
     }
 
-    pub async fn get_pairing_qr_data(&self) -> PairingQrData {
-        let ip = local_ip()
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|_| "127.0.0.1".to_string());
+    /// Finds the best Local LAN IP address (192.168.x.x or 10.x.x.x), bypassing VPN virtual adapters (tun0, wireguard, 172.x)
+    pub fn resolve_lan_ip() -> String {
+        if let Ok(interfaces) = if_addrs::get_if_addrs() {
+            let mut best_192 = None;
+            let mut best_10 = None;
+            let mut other_lan = None;
 
+            for iface in interfaces {
+                // Ignore loopback
+                if iface.is_loopback() {
+                    continue;
+                }
+
+                if let std::net::IpAddr::V4(ipv4) = iface.ip() {
+                    let ip_str = ipv4.to_string();
+                    let name_lower = iface.name.to_lowercase();
+
+                    // Skip known VPN / Virtual adapter keywords
+                    if name_lower.contains("tun")
+                        || name_lower.contains("tap")
+                        || name_lower.contains("vpn")
+                        || name_lower.contains("wireguard")
+                        || name_lower.contains("wsl")
+                        || name_lower.contains("docker")
+                        || name_lower.contains("vbox")
+                        || name_lower.contains("vmware")
+                    {
+                        continue;
+                    }
+
+                    // Priority 1: Standard Home LAN (192.168.x.x)
+                    if ip_str.starts_with("192.168.") {
+                        // Prefer standard physical Wi-Fi/Ethernet subnets over VirtualBox 192.168.56.x
+                        if !ip_str.starts_with("192.168.56.") {
+                            best_192 = Some(ip_str);
+                            break;
+                        } else if best_192.is_none() {
+                            best_192 = Some(ip_str);
+                        }
+                    }
+                    // Priority 2: 10.x.x.x private range
+                    else if ip_str.starts_with("10.") {
+                        best_10 = Some(ip_str);
+                    }
+                    // Priority 3: Non-VPN private IP
+                    else if !ip_str.starts_with("172.") && !ip_str.starts_with("169.254.") {
+                        other_lan = Some(ip_str);
+                    }
+                }
+            }
+
+            if let Some(ip) = best_192 {
+                return ip;
+            }
+            if let Some(ip) = best_10 {
+                return ip;
+            }
+            if let Some(ip) = other_lan {
+                return ip;
+            }
+        }
+
+        // Fallback
+        local_ip_address::local_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|_| "192.168.1.4".to_string())
+    }
+
+    pub async fn get_pairing_qr_data(&self) -> PairingQrData {
+        let ip = Self::resolve_lan_ip();
         let secret = self.pairing_secret.read().await.clone();
 
         PairingQrData {
@@ -83,7 +146,6 @@ impl CompanionServer {
 
     /// Starts both the UDP Discovery Beacon and WebSocket listener server
     pub fn start(&self) {
-        let app = self.app_handle.clone();
         let db = Arc::clone(&self.database);
         let secret_lock = Arc::clone(&self.pairing_secret);
         let connected_lock = Arc::clone(&self.connected_device);
@@ -100,9 +162,7 @@ impl CompanionServer {
                         let msg_str = String::from_utf8_lossy(&buf[..len]);
                         if msg_str.starts_with("NOTIFY_DISCOVER") {
                             debug!("Received UDP discovery from {}", src);
-                            let local_ip_str = local_ip()
-                                .map(|ip| ip.to_string())
-                                .unwrap_or_else(|_| "127.0.0.1".to_string());
+                            let local_ip_str = Self::resolve_lan_ip();
 
                             let response = format!(
                                 "NOTIFY_SERVER|{}|{}|Notify-PC",
@@ -135,7 +195,7 @@ impl CompanionServer {
             while let Ok((stream, peer_addr)) = listener.accept().await {
                 let app_h = app_ws.clone();
                 let db_ref = Arc::clone(&db);
-                let secret_ref = Arc::clone(&secret_lock);
+                let _secret_ref = Arc::clone(&secret_lock);
                 let conn_dev = Arc::clone(&connected_lock);
                 let out_tx_lock = Arc::clone(&outgoing_lock);
 
