@@ -4,10 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
@@ -24,16 +24,28 @@ class CompanionBackgroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startForegroundNotification()
+        try {
+            startForegroundNotification()
+        } catch (e: Exception) {
+            Log.e("CompanionService", "Foreground notification error", e)
+        }
 
-        companionClient = CompanionClient(applicationContext)
-        companionClient?.startAutoConnection()
-        NotificationCollectorService.companionClient = companionClient
+        try {
+            companionClient = CompanionClient(applicationContext)
+            companionClient?.startAutoConnection()
+            NotificationCollectorService.companionClient = companionClient
+        } catch (e: Exception) {
+            Log.e("CompanionService", "Client start error", e)
+        }
 
         // Periodic Battery & Wi-Fi Telemetry Streamer
         scope.launch {
             while (isActive) {
-                sendTelemetryUpdate()
+                try {
+                    sendTelemetryUpdate()
+                } catch (e: Exception) {
+                    Log.e("CompanionService", "Telemetry error", e)
+                }
                 delay(5000)
             }
         }
@@ -74,7 +86,7 @@ class CompanionBackgroundService : Service() {
                 NotificationManager.IMPORTANCE_LOW
             )
             val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            manager?.createNotificationChannel(channel)
         }
 
         val notification: Notification = NotificationCompat.Builder(this, channelId)
@@ -84,7 +96,11 @@ class CompanionBackgroundService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
-        startForeground(101, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(101, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(101, notification)
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
