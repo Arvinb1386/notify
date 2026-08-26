@@ -97,6 +97,14 @@ impl ConnectionManager {
         }
     }
 
+    /// Connects to an already attached ADB device
+    pub async fn connect_existing(&self, device: DeviceInfo) -> AppResult<()> {
+        info!("Attaching to existing device: {:?}", device);
+        self.set_state(ConnectionState::Connected, Some(device.clone()), None).await;
+        self.spawn_watchdog(device.serial.clone()).await;
+        Ok(())
+    }
+
     /// Disconnects active session and aborts watchdog
     pub async fn disconnect(&self) -> AppResult<()> {
         if let Some(token) = self.watchdog_cancel.write().await.take() {

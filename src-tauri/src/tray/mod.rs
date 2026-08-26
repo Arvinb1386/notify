@@ -1,7 +1,8 @@
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Wry,
+    AppHandle, Manager,
 };
 use tracing::info;
 
@@ -10,7 +11,12 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
 
+    let icon_bytes = include_bytes!("../../icons/32x32.png");
+    let icon_image = Image::from_bytes(icon_bytes)?;
+
     let _tray = TrayIconBuilder::new()
+        .icon(icon_image)
+        .tooltip("Notify - Wireless Android Companion")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -41,6 +47,6 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
 
-    info!("System tray initialized successfully");
+    info!("System tray icon registered successfully");
     Ok(())
 }

@@ -135,4 +135,14 @@ export const tauriApi = {
     }
     return () => {};
   },
+  onTelemetryUpdated: async (callback: (item: DeviceTelemetry) => void): Promise<UnlistenFn> => {
+    try {
+      if (typeof window !== 'undefined' && (isTauri() || '__TAURI_INTERNALS__' in window)) {
+        return await listen<DeviceTelemetry>('telemetry-updated', (e) => callback(e.payload));
+      }
+    } catch (e) {
+      console.warn('Browser mode: telemetry listener mock active');
+    }
+    return () => {};
+  },
 };

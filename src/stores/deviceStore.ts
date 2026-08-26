@@ -49,7 +49,7 @@ export const useDeviceStore = create<DeviceStoreState>((set, get) => ({
       console.warn('Initial connection fetch error:', e);
     }
 
-    const unlisten = await tauriApi.onConnectionStatusChanged((event) => {
+    const unlistenConn = await tauriApi.onConnectionStatusChanged((event) => {
       set({
         connectionState: event.state,
         activeDevice: event.device || null,
@@ -63,7 +63,14 @@ export const useDeviceStore = create<DeviceStoreState>((set, get) => ({
       }
     });
 
-    return unlisten;
+    const unlistenTelemetry = await tauriApi.onTelemetryUpdated((telemetry) => {
+      set({ telemetry });
+    });
+
+    return () => {
+      unlistenConn();
+      unlistenTelemetry();
+    };
   },
 
   fetchTelemetry: async () => {

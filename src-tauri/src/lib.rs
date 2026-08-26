@@ -13,6 +13,8 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use tauri_plugin_notification::NotificationExt;
+
 use adb::{AdbClient, AdbCommands, ConnectionManager, ConnectionState, DeviceInfo};
 use controls::{DeviceCapabilities, RemoteControls};
 use error::{AppError, AppResult};
@@ -176,19 +178,54 @@ pub fn run() {
             let db_path = app_data_dir.join("notify.db");
             let database = Arc::new(Database::new(db_path).expect("Failed to initialize SQLite Database"));
 
-            // Setup system tray
+            // Setup system tray & ensure AppUserModelId registered
             let _ = tray::setup_tray(&app_handle);
+            notifications::DesktopNotifier::ensure_app_id_registered();
 
-            // Forward connection status events to frontend
-            let mut conn_rx = conn_manager.subscribe();
-            let handle_conn = app_handle.clone();
+            // Auto-attach if an ADB device is already connected on startup
+            let init_adb = adb_client.clone();
+            let init_conn_mgr = Arc::clone(&conn_manager);
+            let init_notif_eng = Arc::clone(&notif_engine);
             tauri::async_runtime::spawn(async move {
-                while let Ok(event) = conn_rx.recv().await {
-                    let _ = handle_conn.emit("connection-status-changed", event);
+                if let Ok(devices) = AdbCommands::list_devices(&init_adb).await {
+                    if let Some(first_serial) = devices.first() {
+                        if let Ok(dev) = AdbCommands::get_device_info(&init_adb, first_serial).await {
+                            info!("Auto-attached to active ADB device on startup: {}", first_serial);
+                            let _ = init_conn_mgr.connect_existing(dev.clone()).await;
+                            let _ = init_notif_eng.start_monitoring(first_serial.clone()).await;
+                        }
+                    }
                 }
             });
 
-            // Forward notification events to frontend & save to DB
+            // Forward connection status events to frontend & manage telemetry loop
+            let mut conn_rx = conn_manager.subscribe();
+            let handle_conn = app_handle.clone();
+            let adb_for_telemetry = adb_client.clone();
+            let conn_mgr_ref = Arc::clone(&conn_manager);
+            tauri::async_runtime::spawn(async move {
+                while let Ok(event) = conn_rx.recv().await {
+                    let _ = handle_conn.emit("connection-status-changed", &event);
+                }
+            });
+
+            // Fast Live Telemetry Background Poller (Battery & Storage every 3 seconds when connected)
+            let handle_telemetry = app_handle.clone();
+            let adb_telemetry_loop = adb_client.clone();
+            let conn_mgr_for_poll = Arc::clone(&conn_manager);
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+                loop {
+                    interval.tick().await;
+                    if let Some(dev) = conn_mgr_for_poll.get_active_device().await {
+                        if let Ok(telemetry) = TelemetryCollector::collect(&adb_telemetry_loop, &dev.serial).await {
+                            let _ = handle_telemetry.emit("telemetry-updated", &telemetry);
+                        }
+                    }
+                }
+            });
+
+            // Forward notification events to frontend & save to DB & dispatch Windows OS Toast
             let mut notif_rx = notif_engine.subscribe();
             let handle_notif = app_handle.clone();
             let db_ref = Arc::clone(&database);
@@ -196,6 +233,26 @@ pub fn run() {
                 while let Ok(item) = notif_rx.recv().await {
                     let _ = db_ref.insert_notification(&item);
                     let _ = handle_notif.emit("notification-received", &item);
+
+                    // Show Windows Desktop Toast Notification via Native App ID
+                    // Trigger for both new and updated messages (e.g. 2nd incoming message in the same chat)
+                    if item.status == notifications::NotificationStatus::Posted || item.status == notifications::NotificationStatus::Updated {
+                        let sender_title = item.app_name.clone().unwrap_or_else(|| item.package_name.clone());
+                        let display_title = if let Some(ref t) = item.title {
+                            format!("{}: {}", sender_title, t)
+                        } else {
+                            sender_title
+                        };
+
+                        let body_text = if let Some(ref otp) = item.otp_code {
+                            format!("Verification Code: {}\n{}", otp, item.body.clone().unwrap_or_default())
+                        } else {
+                            item.body.clone().unwrap_or_else(|| "New notification received".to_string())
+                        };
+
+                        // Single Native Windows Toast with "Notify" Identity
+                        notifications::DesktopNotifier::show(&display_title, &body_text);
+                    }
                 }
             });
 

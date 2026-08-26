@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use super::dumpsys_parser::{DumpsysParser, NotificationItem, NotificationStatus};
 use crate::adb::client::AdbClient;
@@ -14,7 +14,7 @@ use crate::error::AppResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RawNotificationSignal {
-    Posted(String), // Trigger hint from logcat or poll
+    Posted(String),
     Removed(String),
 }
 
@@ -120,7 +120,7 @@ impl NotificationEngine {
             client,
             active_notifications: Arc::new(RwLock::new(std::collections::HashMap::new())),
             seen_fingerprints: Arc::new(RwLock::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(200).unwrap(),
+                std::num::NonZeroUsize::new(500).unwrap(),
             ))),
             event_sender: tx,
             cancel_token: Arc::new(RwLock::new(None)),
@@ -136,6 +136,20 @@ impl NotificationEngine {
 
         let cancel = CancellationToken::new();
         *self.cancel_token.write().await = Some(cancel.clone());
+
+        // 1. Initial Snapshot Seed: Preload existing notifications so they won't trigger spam toasts on initial connect!
+        let initial_dumpsys = self.client.shell(&serial, &["dumpsys", "notification", "--noredact"]).await.unwrap_or_default();
+        let initial_items = DumpsysParser::parse_snapshot(&initial_dumpsys);
+        {
+            let mut active_lock = self.active_notifications.write().await;
+            let mut fp_lock = self.seen_fingerprints.write().await;
+            active_lock.clear();
+            for item in initial_items {
+                fp_lock.put(item.fingerprint.clone(), item.post_time);
+                active_lock.insert(item.id.clone(), item);
+            }
+            info!("Notification Engine seeded with {} baseline notifications", active_lock.len());
+        }
 
         let (signal_tx, mut signal_rx) = mpsc::channel::<RawNotificationSignal>(64);
         let logcat_source = LogcatSource;
@@ -162,7 +176,7 @@ impl NotificationEngine {
                     }
                     signal_opt = signal_rx.recv() => {
                         if signal_opt.is_some() {
-                            // Debounce burst notifications (50ms)
+                            // Instant reaction with tiny debounce (50ms)
                             tokio::time::sleep(Duration::from_millis(50)).await;
                             Self::reconcile_state(&client, &serial, &active_map, &fingerprints, &event_tx).await;
                         }
@@ -180,7 +194,7 @@ impl NotificationEngine {
         }
     }
 
-    /// Fetches dumpsys snapshot and computes Diff: NEW, UPDATED, REMOVED
+    /// Fetches dumpsys snapshot and computes Diff: Emits on NEW or UPDATED (e.g. 2nd incoming message in chat)
     async fn reconcile_state(
         client: &AdbClient,
         serial: &str,
@@ -205,16 +219,23 @@ impl NotificationEngine {
         for item in current_items {
             current_keys.insert(item.id.clone());
 
-            let is_known = active_lock.contains_key(&item.id);
+            let previous_item = active_lock.get(&item.id);
             let is_duplicate_fp = fp_lock.contains(&item.fingerprint);
 
+            // If this exact content was never seen, or if the text/message has changed since last time
             if !is_duplicate_fp {
                 fp_lock.put(item.fingerprint.clone(), item.post_time);
 
-                let event_item = if is_known {
-                    let mut updated = item.clone();
-                    updated.status = NotificationStatus::Updated;
-                    updated
+                let event_item = if let Some(prev) = previous_item {
+                    // Force the status to Posted when the content has meaningfully changed
+                    // so that the Windows toast logic (which checks for Posted/Updated) properly triggers it
+                    let mut fresh = item.clone();
+                    if prev.body != item.body || prev.title != item.title {
+                        fresh.status = NotificationStatus::Posted;
+                    } else {
+                        fresh.status = NotificationStatus::Updated;
+                    }
+                    fresh
                 } else {
                     item.clone()
                 };
