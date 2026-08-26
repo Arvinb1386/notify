@@ -1,4 +1,5 @@
 pub mod adb;
+pub mod companion;
 pub mod controls;
 pub mod error;
 pub mod notifications;
@@ -16,6 +17,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tauri_plugin_notification::NotificationExt;
 
 use adb::{AdbClient, AdbCommands, ConnectionManager, ConnectionState, DeviceInfo};
+use companion::{CompanionServer, ConnectedCompanion, PairingQrData};
 use controls::{DeviceCapabilities, RemoteControls};
 use error::{AppError, AppResult};
 use notifications::{NotificationEngine, NotificationItem};
@@ -27,6 +29,7 @@ pub struct AppState {
     pub adb_client: AdbClient,
     pub connection_manager: Arc<ConnectionManager>,
     pub notification_engine: Arc<NotificationEngine>,
+    pub companion_server: Arc<CompanionServer>,
     pub database: Arc<Database>,
 }
 
@@ -177,6 +180,21 @@ async fn get_notification_history(limit: Option<u32>, state: State<'_, AppState>
 }
 
 #[tauri::command]
+async fn get_companion_pairing_qr(state: State<'_, AppState>) -> Result<PairingQrData, AppError> {
+    Ok(state.companion_server.get_pairing_qr_data().await)
+}
+
+#[tauri::command]
+async fn get_connected_companion(state: State<'_, AppState>) -> Result<Option<ConnectedCompanion>, AppError> {
+    Ok(state.companion_server.get_connected_companion().await)
+}
+
+#[tauri::command]
+async fn send_companion_reply(key: String, reply_text: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.companion_server.send_quick_reply(key, reply_text).await
+}
+
+#[tauri::command]
 async fn clear_notification_history(state: State<'_, AppState>) -> Result<(), AppError> {
     state.database.clear_notifications()
 }
@@ -216,6 +234,9 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let db_path = app_data_dir.join("notify.db");
             let database = Arc::new(Database::new(db_path).expect("Failed to initialize SQLite Database"));
+
+            let companion_server = Arc::new(CompanionServer::new(app_handle.clone(), Arc::clone(&database)));
+            companion_server.start();
 
             // Setup system tray & ensure AppUserModelId registered
             let _ = tray::setup_tray(&app_handle);
@@ -299,6 +320,7 @@ pub fn run() {
                 adb_client,
                 connection_manager: conn_manager,
                 notification_engine: notif_engine,
+                companion_server,
                 database,
             });
 
@@ -311,6 +333,9 @@ pub fn run() {
             connect_by_serial,
             get_saved_devices,
             delete_saved_device,
+            get_companion_pairing_qr,
+            get_connected_companion,
+            send_companion_reply,
             disconnect_device,
             get_connection_state,
             get_active_device,

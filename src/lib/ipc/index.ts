@@ -115,6 +115,14 @@ export const tauriApi = {
   copyOtpToClipboard: (code: string, ttlSecs?: number): Promise<void> =>
     safeInvoke('copy_otp_to_clipboard', { code, ttlSecs }),
 
+  // Companion App Integration
+  getCompanionPairingQr: (): Promise<import('../../types').PairingQrData> =>
+    safeInvoke('get_companion_pairing_qr'),
+  getConnectedCompanion: (): Promise<import('../../types').ConnectedCompanion | null> =>
+    safeInvoke('get_connected_companion'),
+  sendCompanionReply: (key: string, replyText: string): Promise<void> =>
+    safeInvoke('send_companion_reply', { key, replyText }),
+
   // Notification Storage
   getNotificationHistory: (limit?: number): Promise<NotificationItem[]> =>
     safeInvoke('get_notification_history', { limit }),

@@ -1,0 +1,40 @@
+name: Build Android Companion APK
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+
+    - name: Grant Execute Permission for Gradlew
+      run: |
+        cd android-companion
+        chmod +x gradlew 2>/dev/null || true
+
+    - name: Build Debug APK with Gradle
+      run: |
+        cd android-companion
+        gradle wrapper
+        ./gradlew assembleDebug --stacktrace
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: notify-companion-apk
+        path: android-companion/app/build/outputs/apk/debug/app-debug.apk

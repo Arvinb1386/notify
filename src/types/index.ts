@@ -59,6 +59,23 @@ export interface SavedDevice {
   last_connected: number;
 }
 
+export interface PairingQrData {
+  server_ip: string;
+  port: number;
+  secret_token: string;
+  server_name: string;
+}
+
+export interface ConnectedCompanion {
+  device_id: string;
+  device_name: string;
+  manufacturer: string;
+  model: string;
+  android_version: string;
+  ip_address: string;
+  connected_at: number;
+}
+
 export interface DeviceCapabilities {
   supports_volume: boolean;
   supports_media: boolean;
