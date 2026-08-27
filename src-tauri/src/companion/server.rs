@@ -5,6 +5,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::protocol::{CompanionMessage, PairingQrData};
@@ -34,6 +35,11 @@ pub struct CompanionServer {
     pairing_secret: Arc<RwLock<String>>,
     connected_device: Arc<RwLock<Option<ConnectedCompanion>>>,
     outgoing_tx: Arc<RwLock<Option<mpsc::Sender<CompanionMessage>>>>,
+    /// When true (user pressed Disconnect on the PC), incoming companion
+    /// sessions are rejected immediately so the phone cannot auto-reconnect.
+    paused: Arc<RwLock<bool>>,
+    /// Cancels the currently active companion WebSocket session.
+    session_cancel: Arc<RwLock<Option<CancellationToken>>>,
 }
 
 impl CompanionServer {
@@ -45,6 +51,35 @@ impl CompanionServer {
             pairing_secret: Arc::new(RwLock::new(secret)),
             connected_device: Arc::new(RwLock::new(None)),
             outgoing_tx: Arc::new(RwLock::new(None)),
+            paused: Arc::new(RwLock::new(false)),
+            session_cancel: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// User-initiated disconnect: drops the active companion connection and
+    /// blocks re-connections until resume_companion() is called again.
+    pub async fn pause(&self) {
+        info!("Companion server paused by user (disconnect requested)");
+        *self.paused.write().await = true;
+
+        if let Some(token) = self.session_cancel.write().await.take() {
+            token.cancel();
+        }
+
+        let had_device = self.connected_device.write().await.take();
+        *self.outgoing_tx.write().await = None;
+
+        if let Some(dev) = had_device {
+            let _ = self.app_handle.emit("companion-disconnected", &dev);
+        }
+    }
+
+    /// Re-enables accepting companion connections (e.g. when the user opens
+    /// the pairing wizard or explicitly connects a device again).
+    pub async fn resume(&self) {
+        if *self.paused.read().await {
+            info!("Companion server resumed");
+            *self.paused.write().await = false;
         }
     }
 
@@ -84,19 +119,20 @@ impl CompanionServer {
         if octets[0] == 127 || (octets[0] == 169 && octets[1] == 254) {
             return None;
         }
-        // CGNAT range 100.64.0.0/10 — used by Tailscale, carrier NAT, mobile hotspots via VPN overlays
-        if octets[0] == 100 && (64..=127).contains(&octets[1]) {
-            return None;
-        }
         // Multicast (224.x) & reserved (240.x+) — never usable
         if octets[0] >= 224 {
             return None;
         }
-        // Only private ranges matter for LAN pairing
+        // Only private / CGNAT ranges matter for pairing:
+        //   - private: real LANs
+        //   - CGNAT 100.64/10: Tailscale/ZeroTier-style meshes where both devices
+        //     may share the same overlay when their VPNs are connected to the
+        //     same network — kept as an ultra-low priority escape hatch.
         let is_private = octets[0] == 10
             || (octets[0] == 172 && (16..=31).contains(&octets[1]))
             || (octets[0] == 192 && octets[1] == 168);
-        if !is_private {
+        let is_cgnat = octets[0] == 100 && (64..=127).contains(&octets[1]);
+        if !is_private && !is_cgnat {
             return None;
         }
 
@@ -104,10 +140,13 @@ impl CompanionServer {
         //   192.168.x  -> classic home LAN routers (strongest signal)
         //   172.16-31  -> valid private LAN, slightly unusual
         //   10.x       -> ambiguous: real corporate LANs AND most consumer VPNs use it
+        //   CGNAT      -> same-VPN mesh fallback only
         let mut score = if octets[0] == 192 && octets[1] == 168 {
             30
         } else if octets[0] == 172 {
             12
+        } else if is_cgnat {
+            -40
         } else {
             5
         };
@@ -203,6 +242,8 @@ impl CompanionServer {
         let secret_lock = Arc::clone(&self.pairing_secret);
         let connected_lock = Arc::clone(&self.connected_device);
         let outgoing_lock = Arc::clone(&self.outgoing_tx);
+        let paused_lock = Arc::clone(&self.paused);
+        let session_cancel_lock = Arc::clone(&self.session_cancel);
 
         // 1. UDP Discovery Responder Loop
         tokio::spawn(async move {
@@ -245,7 +286,7 @@ impl CompanionServer {
             }
         });
 
-        // 2. WebSocket Connection Server
+    // 2. WebSocket Connection Server
         let app_ws = self.app_handle.clone();
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{}", COMPANION_WS_PORT);
@@ -266,12 +307,27 @@ impl CompanionServer {
                 let _secret_ref = Arc::clone(&secret_lock);
                 let conn_dev = Arc::clone(&connected_lock);
                 let out_tx_lock = Arc::clone(&outgoing_lock);
+                let paused_flag = Arc::clone(&paused_lock);
+                let session_slot = Arc::clone(&session_cancel_lock);
 
                 tokio::spawn(async move {
+                    // Reject sessions while the user has disconnected on purpose
+                    if *paused_flag.read().await {
+                        debug!("Companion connection from {} rejected (server paused)", peer_addr);
+                        if let Ok(mut ws) = accept_async(stream).await {
+                            let _ = ws.send(Message::Close(None)).await;
+                        }
+                        return;
+                    }
+
                     info!("Incoming Companion connection from {}", peer_addr);
                     if let Ok(ws_stream) = accept_async(stream).await {
                         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
                         let (tx, mut rx) = mpsc::channel::<CompanionMessage>(32);
+
+                        // Register a cancellation token so pause() can kill this session
+                        let cancel_token = CancellationToken::new();
+                        *session_slot.write().await = Some(cancel_token.clone());
 
                         // Save outgoing sender
                         *out_tx_lock.write().await = Some(tx);
@@ -290,9 +346,24 @@ impl CompanionServer {
                         let mut device_info_holder: Option<ConnectedCompanion> = None;
 
                         // Process incoming messages from Android app
-                        while let Some(Ok(msg)) = ws_receiver.next().await {
-                            if let Message::Text(text) = msg {
-                                if let Ok(parsed) = serde_json::from_str::<CompanionMessage>(text.as_str()) {
+                        loop {
+                            tokio::select! {
+                                _ = cancel_token.cancelled() => {
+                                    info!("Companion session cancelled (user disconnect)");
+                                    break;
+                                }
+                                msg = ws_receiver.next() => {
+                                    let text = match msg {
+                                        Some(Ok(Message::Text(t))) => t,
+                                        _ => break,
+                                    };
+                                    let parsed = match serde_json::from_str::<CompanionMessage>(text.as_str()) {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            debug!("Ignoring malformed companion message: {}", e);
+                                            continue;
+                                        }
+                                    };
                                     match parsed {
                                         CompanionMessage::Handshake {
                                             device_id,
@@ -343,7 +414,7 @@ impl CompanionServer {
                                             let fingerprint = format!("{:x}", hasher.finalize());
 
                                             let notif_item = NotificationItem {
-                                                id: key,
+                                                id: key.clone(),
                                                 package_name: package_name.clone(),
                                                 app_name: Some(app_name.clone()),
                                                 title: title.clone(),
@@ -354,27 +425,46 @@ impl CompanionServer {
                                                 is_otp,
                                                 otp_code: otp_code.clone(),
                                                 status: NotificationStatus::Posted,
-                                                fingerprint,
+                                                fingerprint: fingerprint.clone(),
                                             };
+
+                                            // Collapse chatty updates (progress bars etc.):
+                                            // identical repeat payloads are dropped entirely.
+                                            let signature = format!(
+                                                "{}|{}|{}|{}|{}",
+                                                title.as_deref().unwrap_or(""),
+                                                body.as_deref().unwrap_or(""),
+                                                subtext.as_deref().unwrap_or(""),
+                                                otp_code.as_deref().unwrap_or(""),
+                                                post_time
+                                            );
+                                            if !crate::notifications::UpdateGate::should_forward(&key, &signature) {
+                                                continue;
+                                            }
 
                                             let _ = db_ref.insert_notification(&notif_item);
                                             let _ = app_h.emit("notification-received", &notif_item);
 
-                                            let display_title = if let Some(ref t) = title {
-                                                format!("{}: {}", app_name, t)
-                                            } else {
-                                                app_name
-                                            };
+                                            // Toast only for genuinely new / changed notifications,
+                                            // never once-per-second progress ticks.
+                                            if crate::notifications::UpdateGate::should_show_toast(&key, &signature, is_otp) {
+                                                let display_title = if let Some(ref t) = title {
+                                                    format!("{}: {}", app_name, t)
+                                                } else {
+                                                    app_name
+                                                };
 
-                                            let body_text = if let Some(ref otp) = otp_code {
-                                                format!("Verification Code: {}\n{}", otp, body.clone().unwrap_or_default())
-                                            } else {
-                                                body.clone().unwrap_or_else(|| "New message".to_string())
-                                            };
+                                                let body_text = if let Some(ref otp) = otp_code {
+                                                    format!("Verification Code: {}\n{}", otp, body.clone().unwrap_or_default())
+                                                } else {
+                                                    body.clone().unwrap_or_else(|| "New message".to_string())
+                                                };
 
-                                            DesktopNotifier::show(&display_title, &body_text);
+                                                DesktopNotifier::show(&display_title, &body_text);
+                                            }
                                         }
                                         CompanionMessage::NotificationRemoved { key, package_name } => {
+                                            crate::notifications::UpdateGate::forget(&key);
                                             let notif_item = NotificationItem {
                                                 id: key,
                                                 package_name,

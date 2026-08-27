@@ -193,6 +193,27 @@ class MainActivity : AppCompatActivity() {
             layout.addView(portInput)
             layout.addView(connectBtn)
 
+            // ---- Disconnect Button ----
+            val disconnectBtn = Button(this).apply {
+                text = "Disconnect from PC"
+                setBackgroundColor(0xFFDC2626.toInt())
+                setTextColor(0xFFFFFFFF.toInt())
+                setOnClickListener {
+                    if (companionClient.isConnected || !companionClient.userDisconnected) {
+                        companionClient.disconnectUser()
+                        statusText.text = "Status: ○ Disconnected. Tap Connect to pair again."
+                        statusText.setTextColor(0xFF9E9E9E.toInt())
+                        Toast.makeText(this@MainActivity, "Disconnected from PC", Toast.LENGTH_SHORT).show()
+
+                        // Stop the background service so nothing reconnects silently
+                        try {
+                            stopService(Intent(this@MainActivity, CompanionBackgroundService::class.java))
+                        } catch (_: Exception) {}
+                    }
+                }
+            }
+            layout.addView(disconnectBtn)
+
             scrollView.addView(layout)
             setContentView(scrollView)
         } catch (e: Exception) {
@@ -305,6 +326,9 @@ class MainActivity : AppCompatActivity() {
         if (companionClient.isConnected) {
             statusText.text = "Status: ● Connected to ${companionClient.currentServerAddress ?: "PC"}"
             statusText.setTextColor(0xFF10B981.toInt())
+        } else if (companionClient.userDisconnected) {
+            statusText.text = "Status: ○ Disconnected manually"
+            statusText.setTextColor(0xFF9E9E9E.toInt())
         }
     }
 

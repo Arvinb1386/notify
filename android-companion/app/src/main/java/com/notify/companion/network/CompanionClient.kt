@@ -1,6 +1,10 @@
 package com.notify.companion.network
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -11,6 +15,8 @@ import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.TimeUnit
 
 class CompanionClient(private val context: Context) {
@@ -22,6 +28,7 @@ class CompanionClient(private val context: Context) {
         fun getInstance(context: Context): CompanionClient {
             return sharedClient ?: synchronized(this) {
                 sharedClient ?: CompanionClient(context.applicationContext).also {
+                    it.registerUnderlyingNetworkMonitor()
                     sharedClient = it
                 }
             }
@@ -34,6 +41,71 @@ class CompanionClient(private val context: Context) {
         .retryOnConnectionFailure(true)
         .build()
 
+    // ---------------------------------------------------------------------------
+    // Underlying (non-VPN) network binding.
+    //
+    // When the phone's VPN is active, Android routes ALL traffic — including UDP
+    // broadcast and plain LAN traffic — into the tunnel by default. That made the
+    // companion unable to reach the PC on real Wi-Fi ("reconnecting" forever).
+    // We grab the underlying Wi-Fi/Ethernet Network via ConnectivityManager and
+    // explicitly bind every discovery socket / TCP probe / WebSocket to it,
+    // bypassing the tunnel entirely.
+    // ---------------------------------------------------------------------------
+    @Volatile private var underlyingNetwork: Network? = null
+
+    @Volatile private var webSocketClient: OkHttpClient = client
+
+    private fun registerUnderlyingNetworkMonitor() {
+        try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                .build()
+
+            cm.registerNetworkCallback(request, object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    underlyingNetwork = network
+                    rebuildWebSocketClient()
+                    Log.i("CompanionClient", "Underlying Wi-Fi/Ethernet network available: $network (VPN bypass active)")
+                }
+
+                override fun onLost(network: Network) {
+                    if (underlyingNetwork == network) {
+                        underlyingNetwork = null
+                        rebuildWebSocketClient()
+                        Log.w("CompanionClient", "Underlying network lost — falling back to default routing")
+                    }
+                }
+            })
+
+            // Pick up any already-active Wi-Fi immediately (callback only fires on changes)
+            for (network in cm.allNetworks) {
+                val caps = cm.getNetworkCapabilities(network)
+                if (caps != null &&
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                    !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                ) {
+                    underlyingNetwork = network
+                    rebuildWebSocketClient()
+                    break
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("CompanionClient", "Network monitor registration failed", e)
+        }
+    }
+
+    /** OkHttp client that routes through the underlying Wi-Fi when one exists */
+    private fun rebuildWebSocketClient() {
+        webSocketClient = underlyingNetwork?.let { network ->
+            client.newBuilder()
+                .socketFactory(network.socketFactory)
+                .dns { host -> network.getAllByName(host).toList() }
+                .build()
+        } ?: client
+    }
+
     private var webSocket: WebSocket? = null
     var isConnected = false
         private set
@@ -43,6 +115,14 @@ class CompanionClient(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Set when the user pressed Disconnect — blocks auto-reconnect until they connect manually again */
+    @Volatile
+    var userDisconnected = false
+        private set
+
+    /** Guards against spawning multiple auto-reconnect loops (service restarts) */
+    private var autoConnectStarted = false
 
     var onQuickReplyReceived: ((key: String, text: String) -> Unit)? = null
     var onConnectionStateChanged: ((Boolean, String?) -> Unit)? = null
@@ -54,11 +134,13 @@ class CompanionClient(private val context: Context) {
     data class DiscoveredServer(val ips: List<String>, val port: Int, val name: String)
 
     fun startAutoConnection() {
+        if (autoConnectStarted) return
+        autoConnectStarted = true
+
         scope.launch {
             while (isActive) {
-                if (!isConnected) {
-                    val savedIp = sharedPrefs.getString("server_ip", null)
-                    val savedPort = sharedPrefs.getInt("server_port", 27890)
+                if (!isConnected && !userDisconnected) {
+                    val savedIps = loadSavedCandidates()
 
                     // 1. Try UDP broadcast auto-discovery first
                     Log.d("CompanionClient", "Searching local Wi-Fi via UDP Discovery...")
@@ -68,15 +150,12 @@ class CompanionClient(private val context: Context) {
                         mainHandler.post {
                             onDiscoveryFound?.invoke(discovered.ips, discovered.port, discovered.name)
                         }
-                        sharedPrefs.edit()
-                            .putString("server_ip", discovered.ips.first())
-                            .putInt("server_port", discovered.port)
-                            .apply()
+                        saveCandidate(discovered.ips.first(), discovered.port)
                         connectToServers(discovered.ips, discovered.port)
-                    } else if (!savedIp.isNullOrBlank()) {
-                        // 2. Fallback to saved IP
-                        Log.d("CompanionClient", "Connecting to saved IP $savedIp:$savedPort")
-                        connectToServers(listOf(savedIp), savedPort)
+                    } else if (savedIps.isNotEmpty()) {
+                        // 2. Fallback to saved candidates (rotates through all known IPs)
+                        Log.d("CompanionClient", "Connecting to saved candidates $savedIps")
+                        connectToServers(savedIps, loadSavedPort())
                     }
                 }
                 delay(4000)
@@ -100,6 +179,7 @@ class CompanionClient(private val context: Context) {
         var socket: DatagramSocket? = null
         try {
             socket = DatagramSocket()
+            underlyingNetwork?.bindSocket(socket)
             socket.broadcast = true
             socket.reuseAddress = true
             socket.soTimeout = 1500
@@ -162,11 +242,12 @@ class CompanionClient(private val context: Context) {
 
     private fun connectWithCandidates(candidates: List<String>, port: Int, secret: String) {
         val primary = candidates.firstOrNull() ?: return
-        sharedPrefs.edit()
-            .putString("server_ip", primary)
-            .putInt("server_port", port)
-            .putString("pairing_secret", secret)
-            .apply()
+
+        // Manual connection always clears a previous user-disconnect request
+        userDisconnected = false
+
+        saveCandidates(candidates, port)
+        sharedPrefs.edit().putString("pairing_secret", secret).apply()
 
         scope.launch {
             connectToServers(candidates, port)
@@ -174,33 +255,89 @@ class CompanionClient(private val context: Context) {
     }
 
     /**
-     * Probes every candidate LAN IP and opens the WebSocket to the first one that
-     * actually responds. Under an active VPN the PC may advertise tunnel IPs
-     * (10.x / 100.x etc.) that the phone can't reach on LAN — those fail the TCP
-     * probe within ~800ms each and are skipped instead of breaking pairing.
+     * User-initiated disconnect from the phone side. Closes the WebSocket and
+     * stops auto-reconnect loops until the user connects manually again.
      */
-    private suspend fun connectToServers(candidates: List<String>, port: Int) {
-        for (candidate in candidates.distinct()) {
-            if (!isHostReachable(candidate, port)) {
-                Log.d("CompanionClient", "Skipping unreachable candidate $candidate:$port (likely a VPN/tunnel IP)")
-                continue
-            }
-            Log.i("CompanionClient", "PC reachable at $candidate:$port, opening WebSocket")
-            connectToWebSocket(candidate, port)
-            return
-        }
-
-        Log.w("CompanionClient", "No reachable PC among candidates $candidates:$port")
+    fun disconnectUser() {
+        Log.i("CompanionClient", "User requested disconnect")
+        userDisconnected = true
+        isConnected = false
+        currentServerAddress = null
+        try {
+            webSocket?.close(1000, "user_disconnect")
+        } catch (_: Exception) {}
+        try {
+            webSocket?.cancel()
+        } catch (_: Exception) {}
+        webSocket = null
         mainHandler.post {
             onConnectionStateChanged?.invoke(false, null)
         }
     }
 
-    /** Fast TCP reachability probe (800ms timeout) */
+    // ---- Candidate persistence helpers ----
+
+    private fun loadSavedCandidates(): List<String> {
+        val raw = sharedPrefs.getString("server_ips", null)
+            ?: sharedPrefs.getString("server_ip", null)
+            ?: return emptyList()
+        return raw.split(',').map { it.trim() }.filter { it.contains('.') }
+    }
+
+    private fun loadSavedPort(): Int = sharedPrefs.getInt("server_port", 27890)
+
+    private fun saveCandidate(ip: String, port: Int) {
+        // Merge with previously known candidates so we never "forget" IPs that
+        // only appeared once (e.g. PC briefly advertising its VPN tunnel IP).
+        val merged = LinkedHashSet(loadSavedCandidates())
+        merged.add(ip)
+        saveCandidates(merged.toList(), port)
+    }
+
+    private fun saveCandidates(ips: List<String>, port: Int) {
+        sharedPrefs.edit()
+            .putString("server_ips", ips.joinToString(","))
+            .putString("server_ip", ips.firstOrNull() ?: "")
+            .putInt("server_port", port)
+            .apply()
+    }
+
+    /**
+     * Probes every candidate LAN IP IN PARALLEL and opens the WebSocket to the
+     * best reachable one (original advertisement order wins ties). Under an
+     * active VPN the PC may advertise tunnel IPs (10.x / 100.x etc.) that the
+     * phone can't reach — those fail the TCP probe within ~800ms and are
+     * skipped instead of breaking pairing.
+     */
+    private suspend fun connectToServers(candidates: List<String>, port: Int) {
+        val distinct = candidates.distinct()
+        val reachable = distinct.map { candidate ->
+            scope.async(Dispatchers.IO) {
+                if (isHostReachable(candidate, port)) candidate else null
+            }
+        }.awaitAll().filterNotNull()
+
+        if (reachable.isEmpty()) {
+            Log.w("CompanionClient", "No reachable PC among candidates $distinct:$port")
+            mainHandler.post {
+                onConnectionStateChanged?.invoke(false, null)
+            }
+            return
+        }
+
+        // Preserve the PC's advertised priority order
+        val winner = distinct.first { it in reachable }
+        Log.i("CompanionClient", "PC reachable at $winner:$port (${reachable.size}/${distinct.size} candidates responded), opening WebSocket")
+        saveCandidate(winner, port)
+        connectToWebSocket(winner, port)
+    }
+
+    /** Fast TCP reachability probe (800ms timeout), bound to real Wi-Fi when a VPN is active */
     private fun isHostReachable(ip: String, port: Int): Boolean {
         return try {
-            java.net.Socket().use { socket ->
-                socket.connect(java.net.InetSocketAddress(ip, port), 800)
+            Socket().use { socket ->
+                underlyingNetwork?.bindSocket(socket)
+                socket.connect(InetSocketAddress(ip, port), 800)
                 true
             }
         } catch (_: Exception) {
@@ -217,7 +354,8 @@ class CompanionClient(private val context: Context) {
 
             currentServerAddress = "$ip:$port"
 
-            webSocket = client.newWebSocket(request, object : WebSocketListener() {
+            // webSocketClient routes through the underlying Wi-Fi when a VPN is active
+            webSocket = webSocketClient.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(ws: WebSocket, response: Response) {
                     Log.i("CompanionClient", "WebSocket Connected to $ip:$port")
                     isConnected = true

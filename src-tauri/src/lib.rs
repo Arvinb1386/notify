@@ -54,6 +54,7 @@ async fn connect_device(
     port: u16,
     state: State<'_, AppState>,
 ) -> Result<DeviceInfo, AppError> {
+    state.companion_server.resume().await;
     let dev = state.connection_manager.connect(&host, port).await?;
     let _ = state.database.save_device(&dev);
     let _ = state.notification_engine.start_monitoring(dev.serial.clone()).await;
@@ -65,6 +66,7 @@ async fn connect_by_serial(
     serial: String,
     state: State<'_, AppState>,
 ) -> Result<DeviceInfo, AppError> {
+    state.companion_server.resume().await;
     // If serial contains host:port
     if let Some((host, port_str)) = serial.rsplit_once(':') {
         if let Ok(port) = port_str.parse::<u16>() {
@@ -96,6 +98,9 @@ async fn delete_saved_device(serial: String, state: State<'_, AppState>) -> Resu
 #[tauri::command]
 async fn disconnect_device(state: State<'_, AppState>) -> Result<(), AppError> {
     state.notification_engine.stop().await;
+    // Drop the companion WebSocket session AND reject auto-reconnect attempts
+    // from the phone until the user explicitly pairs/connects again.
+    state.companion_server.pause().await;
     state.connection_manager.disconnect().await
 }
 
@@ -181,6 +186,9 @@ async fn get_notification_history(limit: Option<u32>, state: State<'_, AppState>
 
 #[tauri::command]
 async fn get_companion_pairing_qr(state: State<'_, AppState>) -> Result<PairingQrData, AppError> {
+    // Opening the pairing wizard means the user wants to (re)connect —
+    // clear any user-disconnect pause so the phone can reach us again.
+    state.companion_server.resume().await;
     Ok(state.companion_server.get_pairing_qr_data().await)
 }
 
@@ -291,27 +299,52 @@ pub fn run() {
             let db_ref = Arc::clone(&database);
             tauri::async_runtime::spawn(async move {
                 while let Ok(item) = notif_rx.recv().await {
-                    let _ = db_ref.insert_notification(&item);
-                    let _ = handle_notif.emit("notification-received", &item);
+                    // Collapse chatty updates (download progress etc.):
+                    // identical repeat payloads are dropped entirely.
+                    let signature = format!(
+                        "{}|{}|{}|{}",
+                        item.title.as_deref().unwrap_or(""),
+                        item.body.as_deref().unwrap_or(""),
+                        item.subtext.as_deref().unwrap_or(""),
+                        item.post_time
+                    );
 
-                    // Show Windows Desktop Toast Notification via Native App ID
-                    // Trigger for both new and updated messages (e.g. 2nd incoming message in the same chat)
-                    if item.status == notifications::NotificationStatus::Posted || item.status == notifications::NotificationStatus::Updated {
-                        let sender_title = item.app_name.clone().unwrap_or_else(|| item.package_name.clone());
-                        let display_title = if let Some(ref t) = item.title {
-                            format!("{}: {}", sender_title, t)
-                        } else {
-                            sender_title
-                        };
+                    if item.status == notifications::NotificationStatus::Removed {
+                        notifications::UpdateGate::forget(&item.id);
+                    } else if !notifications::UpdateGate::should_forward(&item.id, &signature) {
+                        continue;
+                    }
 
-                        let body_text = if let Some(ref otp) = item.otp_code {
-                            format!("Verification Code: {}\n{}", otp, item.body.clone().unwrap_or_default())
-                        } else {
-                            item.body.clone().unwrap_or_else(|| "New notification received".to_string())
-                        };
+                    if item.status != notifications::NotificationStatus::Removed {
+                        let _ = db_ref.insert_notification(&item);
+                        let _ = handle_notif.emit("notification-received", &item);
 
-                        // Single Native Windows Toast with "Notify" Identity
-                        notifications::DesktopNotifier::show(&display_title, &body_text);
+                        // Show Windows Desktop Toast Notification via Native App ID
+                        // Only for genuinely new/changed messages or OTP codes —
+                        // never once-per-second progress ticks.
+                        if item.status == notifications::NotificationStatus::Posted
+                            || item.status == notifications::NotificationStatus::Updated
+                        {
+                            if !notifications::UpdateGate::should_show_toast(&item.id, &signature, item.is_otp) {
+                                continue;
+                            }
+
+                            let sender_title = item.app_name.clone().unwrap_or_else(|| item.package_name.clone());
+                            let display_title = if let Some(ref t) = item.title {
+                                format!("{}: {}", sender_title, t)
+                            } else {
+                                sender_title
+                            };
+
+                            let body_text = if let Some(ref otp) = item.otp_code {
+                                format!("Verification Code: {}\n{}", otp, item.body.clone().unwrap_or_default())
+                            } else {
+                                item.body.clone().unwrap_or_else(|| "New notification received".to_string())
+                            };
+
+                            // Single Native Windows Toast with "Notify" Identity
+                            notifications::DesktopNotifier::show(&display_title, &body_text);
+                        }
                     }
                 }
             });
