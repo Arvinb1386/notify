@@ -1,5 +1,9 @@
 pluginManagement {
     repositories {
+        // Fast mirrors first — protects CI against HTTP 429 rate-limiting on
+        // the overloaded default endpoints (repo.maven.apache.org / plugins.gradle.org).
+        maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }
+        maven { url 'https://cache-redirector.jetbrains.com/repo.maven.apache.org/maven2' }
         google()
         mavenCentral()
         gradlePluginPortal()
@@ -8,6 +12,9 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        // Fast mirrors first — protects CI against HTTP 429 rate-limiting on Maven Central.
+        maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }
+        maven { url 'https://cache-redirector.jetbrains.com/repo.maven.apache.org/maven2' }
         google()
         mavenCentral()
     }
