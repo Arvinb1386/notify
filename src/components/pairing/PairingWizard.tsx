@@ -123,8 +123,20 @@ export const PairingWizard: React.FC = () => {
     }
   };
 
+  // Primary IP first, then every alternate LAN candidate so the phone can
+  // probe each one and skip addresses that are unreachable (e.g. VPN tunnel IPs)
+  const allIps = qrData?.server_ips?.length
+    ? qrData.server_ips
+    : qrData
+      ? [qrData.server_ip]
+      : [];
+  const primaryIp = allIps[0] ?? '';
+  const alternates = allIps.slice(1);
+
   const qrString = qrData
-    ? `notify://pair?ip=${qrData.server_ip}&port=${qrData.port}&secret=${qrData.secret_token}`
+    ? `notify://pair?ip=${primaryIp}${
+        alternates.length ? `&ips=${alternates.join(',')}` : ''
+      }&port=${qrData.port}&secret=${qrData.secret_token}`
     : 'notify://pair';
 
   return (
@@ -210,10 +222,13 @@ export const PairingWizard: React.FC = () => {
                 <p className="text-[11px] text-gray-400">
                   Open the <b>Notify Companion</b> app on your phone. It connects automatically via UDP beacon on Wi-Fi, or enter PC IP:
                 </p>
-                <div className="mt-2 p-2 bg-[#181a20] border border-[#262933] rounded-xl flex items-center justify-center gap-2 text-xs font-mono text-indigo-300">
-                  <span>IP: {qrData?.server_ip || 'Loading...'}</span>
-                  <span>•</span>
-                  <span>Port: {qrData?.port || 27890}</span>
+                <div className="mt-2 p-2 bg-[#181a20] border border-[#262933] rounded-xl flex flex-col items-center justify-center gap-1 text-xs font-mono text-indigo-300">
+                  <span>IP: {primaryIp || 'Loading...'} • Port: {qrData?.port || 27890}</span>
+                  {alternates.length > 0 && (
+                    <span className="text-[10px] text-gray-500">
+                      Alt: {alternates.join(', ')} (auto-probed on VPN)
+                    </span>
+                  )}
                 </div>
               </div>
             </div>

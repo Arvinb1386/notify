@@ -61,6 +61,8 @@ export interface SavedDevice {
 
 export interface PairingQrData {
   server_ip: string;
+  /** All viable LAN IPv4 candidates ranked best-first (VPN-tolerant pairing) */
+  server_ips?: string[];
   port: number;
   secret_token: string;
   server_name: string;

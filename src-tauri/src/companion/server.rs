@@ -48,80 +48,133 @@ impl CompanionServer {
         }
     }
 
-    /// Finds the best Local LAN IP address (192.168.x.x or 10.x.x.x), bypassing VPN virtual adapters (tun0, wireguard, 172.x)
-    pub fn resolve_lan_ip() -> String {
-        if let Ok(interfaces) = if_addrs::get_if_addrs() {
-            let mut best_192 = None;
-            let mut best_10 = None;
-            let mut other_lan = None;
+    /// Detects known VPN / virtual adapter names (keyword match on interface name)
+    fn is_vpn_or_virtual_name(name_lower: &str) -> bool {
+        const VPN_KEYWORDS: &[&str] = &[
+            "tun", "tap", "vpn", "wireguard", "wintun", "tunnel",
+            "nord", "tailscale", "mullvad", "proton", "warp", "cloudflare",
+            "expressvpn", "surfshark", "zenmate", "zerotier", "hamachi", "openvpn",
+            "hyper", "wsl", "docker", "vbox", "virtualbox", "vmware", "virtual",
+            "microsoft host", "hosted network", "loopback pseudo",
+        ];
+        VPN_KEYWORDS.iter().any(|k| name_lower.contains(k))
+    }
 
+    /// Positive score for physical NIC names (Wi-Fi / Ethernet)
+    fn physical_nic_bonus(name_lower: &str) -> i32 {
+        const PHYSICAL_KEYWORDS: &[&str] = &[
+            "wi-fi", "wifi", "wlan", "wireless lan", "ethernet", "eth", "lan connection",
+        ];
+        if PHYSICAL_KEYWORDS.iter().any(|k| name_lower.contains(k)) {
+            40
+        } else {
+            0
+        }
+    }
+
+    /// Scores a candidate IPv4 address for LAN-pairing suitability.
+    /// Returns None for addresses that can never reach a phone on the local network.
+    fn lan_candidate_score(name_lower: &str, ip_str: &str) -> Option<i32> {
+        let octets: Vec<u32> = ip_str.split('.').filter_map(|o| o.parse::<u32>().ok()).collect();
+        if octets.len() != 4 || octets.iter().any(|o| *o > 255) {
+            return None;
+        }
+
+        // Loopback (127.x), link-local (169.254.x) — never usable
+        if octets[0] == 127 || (octets[0] == 169 && octets[1] == 254) {
+            return None;
+        }
+        // CGNAT range 100.64.0.0/10 — used by Tailscale, carrier NAT, mobile hotspots via VPN overlays
+        if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+            return None;
+        }
+        // Multicast (224.x) & reserved (240.x+) — never usable
+        if octets[0] >= 224 {
+            return None;
+        }
+        // Only private ranges matter for LAN pairing
+        let is_private = octets[0] == 10
+            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+            || (octets[0] == 192 && octets[1] == 168);
+        if !is_private {
+            return None;
+        }
+
+        // Base score by subnet class:
+        //   192.168.x  -> classic home LAN routers (strongest signal)
+        //   172.16-31  -> valid private LAN, slightly unusual
+        //   10.x       -> ambiguous: real corporate LANs AND most consumer VPNs use it
+        let mut score = if octets[0] == 192 && octets[1] == 168 {
+            30
+        } else if octets[0] == 172 {
+            12
+        } else {
+            5
+        };
+
+        // VirtualBox host-only adapter (192.168.56.x) — deprioritize heavily
+        if octets[0] == 192 && octets[1] == 168 && octets[2] == 56 {
+            score -= 60;
+        }
+
+        // Name-based signals
+        if Self::is_vpn_or_virtual_name(name_lower) {
+            score -= 50;
+        } else {
+            score += Self::physical_nic_bonus(name_lower);
+        }
+
+        Some(score)
+    }
+
+    /// Returns ALL viable LAN IPv4 addresses ranked best-first.
+    /// Under an active VPN the tunnel usually wins the routing table, so we never
+    /// rely on a single guess: callers hand the whole list to the phone, which
+    /// probes each address and skips the unreachable (VPN) ones.
+    pub fn resolve_lan_candidates() -> Vec<String> {
+        let mut candidates: Vec<(String, i32)> = Vec::new();
+
+        if let Ok(interfaces) = if_addrs::get_if_addrs() {
             for iface in interfaces {
-                // Ignore loopback
                 if iface.is_loopback() {
                     continue;
                 }
-
                 if let std::net::IpAddr::V4(ipv4) = iface.ip() {
                     let ip_str = ipv4.to_string();
                     let name_lower = iface.name.to_lowercase();
-
-                    // Skip known VPN / Virtual adapter keywords
-                    if name_lower.contains("tun")
-                        || name_lower.contains("tap")
-                        || name_lower.contains("vpn")
-                        || name_lower.contains("wireguard")
-                        || name_lower.contains("wsl")
-                        || name_lower.contains("docker")
-                        || name_lower.contains("vbox")
-                        || name_lower.contains("vmware")
-                    {
-                        continue;
-                    }
-
-                    // Priority 1: Standard Home LAN (192.168.x.x)
-                    if ip_str.starts_with("192.168.") {
-                        // Prefer standard physical Wi-Fi/Ethernet subnets over VirtualBox 192.168.56.x
-                        if !ip_str.starts_with("192.168.56.") {
-                            best_192 = Some(ip_str);
-                            break;
-                        } else if best_192.is_none() {
-                            best_192 = Some(ip_str);
+                    if let Some(score) = Self::lan_candidate_score(&name_lower, &ip_str) {
+                        if !candidates.iter().any(|(existing, _)| existing == &ip_str) {
+                            candidates.push((ip_str, score));
                         }
-                    }
-                    // Priority 2: 10.x.x.x private range
-                    else if ip_str.starts_with("10.") {
-                        best_10 = Some(ip_str);
-                    }
-                    // Priority 3: Non-VPN private IP
-                    else if !ip_str.starts_with("172.") && !ip_str.starts_with("169.254.") {
-                        other_lan = Some(ip_str);
                     }
                 }
             }
-
-            if let Some(ip) = best_192 {
-                return ip;
-            }
-            if let Some(ip) = best_10 {
-                return ip;
-            }
-            if let Some(ip) = other_lan {
-                return ip;
-            }
         }
 
-        // Fallback
-        local_ip_address::local_ip()
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|_| "192.168.1.4".to_string())
+        // Best score first; deterministic tiebreak by IP string
+        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        candidates.into_iter().map(|(ip, _)| ip).take(6).collect()
+    }
+
+    /// Best single guess for the LAN IP (primary candidate).
+    pub fn resolve_lan_ip() -> String {
+        Self::resolve_lan_candidates()
+            .first()
+            .cloned()
+            // Last-resort fallback: default-route interface (may be a VPN IP under tunnel,
+            // but still better than nothing — the phone-side probing will discard it anyway).
+            .or_else(|| local_ip_address::local_ip().ok().map(|ip| ip.to_string()))
+            .unwrap_or_else(|| "192.168.1.4".to_string())
     }
 
     pub async fn get_pairing_qr_data(&self) -> PairingQrData {
-        let ip = Self::resolve_lan_ip();
+        let candidates = Self::resolve_lan_candidates();
+        let primary = candidates.first().cloned().unwrap_or_else(Self::resolve_lan_ip);
         let secret = self.pairing_secret.read().await.clone();
 
         PairingQrData {
-            server_ip: ip,
+            server_ip: primary,
+            server_ips: candidates,
             port: COMPANION_WS_PORT,
             secret_token: secret,
             server_name: "Notify PC Companion".to_string(),
@@ -162,13 +215,28 @@ impl CompanionServer {
                         let msg_str = String::from_utf8_lossy(&buf[..len]);
                         if msg_str.starts_with("NOTIFY_DISCOVER") {
                             debug!("Received UDP discovery from {}", src);
-                            let local_ip_str = Self::resolve_lan_ip();
 
-                            let response = format!(
-                                "NOTIFY_SERVER|{}|{}|Notify-PC",
-                                local_ip_str, COMPANION_WS_PORT
-                            );
-                            let _ = socket.send_to(response.as_bytes(), src).await;
+                            // Answer with ONE packet per candidate LAN IP. Under VPN,
+                            // some advertised addresses are tunnel IPs the phone can't
+                            // reach — the phone probes each candidate and connects to
+                            // whichever actually responds.
+                            let candidates = Self::resolve_lan_candidates();
+                            if candidates.is_empty() {
+                                let response = format!(
+                                    "NOTIFY_SERVER|{}|{}|Notify-PC",
+                                    Self::resolve_lan_ip(),
+                                    COMPANION_WS_PORT
+                                );
+                                let _ = socket.send_to(response.as_bytes(), src).await;
+                            } else {
+                                for ip in &candidates {
+                                    let response = format!(
+                                        "NOTIFY_SERVER|{}|{}|Notify-PC",
+                                        ip, COMPANION_WS_PORT
+                                    );
+                                    let _ = socket.send_to(response.as_bytes(), src).await;
+                                }
+                            }
                         }
                     }
                 }

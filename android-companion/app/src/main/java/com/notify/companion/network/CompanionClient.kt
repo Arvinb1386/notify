@@ -46,9 +46,12 @@ class CompanionClient(private val context: Context) {
 
     var onQuickReplyReceived: ((key: String, text: String) -> Unit)? = null
     var onConnectionStateChanged: ((Boolean, String?) -> Unit)? = null
-    var onDiscoveryFound: ((String, Int, String) -> Unit)? = null
+    var onDiscoveryFound: ((List<String>, Int, String) -> Unit)? = null
 
     private val sharedPrefs = context.getSharedPreferences("notify_companion_prefs", Context.MODE_PRIVATE)
+
+    /** A PC server found via UDP broadcast, with every advertised LAN IP candidate */
+    data class DiscoveredServer(val ips: List<String>, val port: Int, val name: String)
 
     fun startAutoConnection() {
         scope.launch {
@@ -60,18 +63,20 @@ class CompanionClient(private val context: Context) {
                     // 1. Try UDP broadcast auto-discovery first
                     Log.d("CompanionClient", "Searching local Wi-Fi via UDP Discovery...")
                     val discovered = discoverServerViaUdp()
-                    if (discovered != null) {
-                        val (ip, port, name) = discovered
-                        Log.i("CompanionClient", "Auto-discovered Notify PC: $name at $ip:$port")
+                    if (discovered != null && discovered.ips.isNotEmpty()) {
+                        Log.i("CompanionClient", "Auto-discovered Notify PC: ${discovered.name} at ${discovered.ips}:${discovered.port}")
                         mainHandler.post {
-                            onDiscoveryFound?.invoke(ip, port, name)
+                            onDiscoveryFound?.invoke(discovered.ips, discovered.port, discovered.name)
                         }
-                        sharedPrefs.edit().putString("server_ip", ip).putInt("server_port", port).apply()
-                        connectToWebSocket(ip, port)
+                        sharedPrefs.edit()
+                            .putString("server_ip", discovered.ips.first())
+                            .putInt("server_port", discovered.port)
+                            .apply()
+                        connectToServers(discovered.ips, discovered.port)
                     } else if (!savedIp.isNullOrBlank()) {
                         // 2. Fallback to saved IP
                         Log.d("CompanionClient", "Connecting to saved IP $savedIp:$savedPort")
-                        connectToWebSocket(savedIp, savedPort)
+                        connectToServers(listOf(savedIp), savedPort)
                     }
                 }
                 delay(4000)
@@ -82,21 +87,21 @@ class CompanionClient(private val context: Context) {
     fun triggerQuickDiscovery() {
         scope.launch {
             val discovered = discoverServerViaUdp()
-            if (discovered != null) {
-                val (ip, port, name) = discovered
+            if (discovered != null && discovered.ips.isNotEmpty()) {
                 mainHandler.post {
-                    onDiscoveryFound?.invoke(ip, port, name)
+                    onDiscoveryFound?.invoke(discovered.ips, discovered.port, discovered.name)
                 }
-                connectWithQrData(ip, port, "")
+                connectToServers(discovered.ips, discovered.port)
             }
         }
     }
 
-    private suspend fun discoverServerViaUdp(): Triple<String, Int, String>? = withContext(Dispatchers.IO) {
+    private suspend fun discoverServerViaUdp(): DiscoveredServer? = withContext(Dispatchers.IO) {
         var socket: DatagramSocket? = null
         try {
             socket = DatagramSocket()
             socket.broadcast = true
+            socket.reuseAddress = true
             socket.soTimeout = 1500
 
             val sendData = "NOTIFY_DISCOVER".toByteArray()
@@ -104,40 +109,102 @@ class CompanionClient(private val context: Context) {
             val sendPacket = DatagramPacket(sendData, sendData.size, broadcastAddr, 27891)
             socket.send(sendPacket)
 
-            val receiveBuf = ByteArray(1024)
-            val receivePacket = DatagramPacket(receiveBuf, receiveBuf.size)
-            socket.receive(receivePacket)
+            // Collect ALL responses within the timeout window: the PC answers with one
+            // packet per LAN IP candidate, some of which may be unreachable VPN IPs.
+            val deadline = System.currentTimeMillis() + 1500
+            val foundIps = LinkedHashSet<String>()
+            var port = 27890
+            var name = "Notify PC"
 
-            val response = String(receivePacket.data, 0, receivePacket.length).trim()
+            while (System.currentTimeMillis() < deadline) {
+                val receiveBuf = ByteArray(1024)
+                val receivePacket = DatagramPacket(receiveBuf, receiveBuf.size)
+                try {
+                    socket.receive(receivePacket)
+                } catch (_: Exception) {
+                    break // socket timeout
+                }
 
-            if (response.startsWith("NOTIFY_SERVER")) {
-                val parts = response.split("|")
-                if (parts.size >= 3) {
-                    val ip = parts[1]
-                    val port = parts[2].toIntOrNull() ?: 27890
-                    val name = if (parts.size >= 4) parts[3] else "Notify PC"
-                    return@withContext Triple(ip, port, name)
+                val response = String(receivePacket.data, 0, receivePacket.length).trim()
+                if (response.startsWith("NOTIFY_SERVER")) {
+                    val parts = response.split("|")
+                    if (parts.size >= 3) {
+                        parts[1].split(",").map { it.trim() }.filter { it.isNotBlank() }.forEach {
+                            foundIps.add(it)
+                        }
+                        port = parts[2].toIntOrNull() ?: 27890
+                        if (parts.size >= 4) name = parts[3]
+                    }
                 }
             }
+
+            if (foundIps.isEmpty()) null else DiscoveredServer(foundIps.toList(), port, name)
         } catch (e: Exception) {
             Log.d("CompanionClient", "UDP discovery timeout or error: ${e.message}")
+            null
         } finally {
             try {
                 socket?.close()
             } catch (_: Exception) {}
         }
-        return@withContext null
     }
 
     fun connectWithQrData(ip: String, port: Int, secret: String) {
+        // Accept single IP or comma/space separated candidate list (e.g. from QR "ips" param)
+        val candidates = ip.split(',', ' ')
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it.contains('.') }
+        connectWithCandidates(candidates, port, secret)
+    }
+
+    fun connectWithQrData(ips: List<String>, port: Int, secret: String) =
+        connectWithCandidates(ips, port, secret)
+
+    private fun connectWithCandidates(candidates: List<String>, port: Int, secret: String) {
+        val primary = candidates.firstOrNull() ?: return
         sharedPrefs.edit()
-            .putString("server_ip", ip)
+            .putString("server_ip", primary)
             .putInt("server_port", port)
             .putString("pairing_secret", secret)
             .apply()
 
         scope.launch {
-            connectToWebSocket(ip, port)
+            connectToServers(candidates, port)
+        }
+    }
+
+    /**
+     * Probes every candidate LAN IP and opens the WebSocket to the first one that
+     * actually responds. Under an active VPN the PC may advertise tunnel IPs
+     * (10.x / 100.x etc.) that the phone can't reach on LAN — those fail the TCP
+     * probe within ~800ms each and are skipped instead of breaking pairing.
+     */
+    private suspend fun connectToServers(candidates: List<String>, port: Int) {
+        for (candidate in candidates.distinct()) {
+            if (!isHostReachable(candidate, port)) {
+                Log.d("CompanionClient", "Skipping unreachable candidate $candidate:$port (likely a VPN/tunnel IP)")
+                continue
+            }
+            Log.i("CompanionClient", "PC reachable at $candidate:$port, opening WebSocket")
+            connectToWebSocket(candidate, port)
+            return
+        }
+
+        Log.w("CompanionClient", "No reachable PC among candidates $candidates:$port")
+        mainHandler.post {
+            onConnectionStateChanged?.invoke(false, null)
+        }
+    }
+
+    /** Fast TCP reachability probe (800ms timeout) */
+    private fun isHostReachable(ip: String, port: Int): Boolean {
+        return try {
+            java.net.Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress(ip, port), 800)
+                true
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 

@@ -67,6 +67,9 @@ pub struct UdpBeaconPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairingQrData {
     pub server_ip: String,
+    /// All viable LAN IPv4 candidates ranked best-first (VPN-tolerant pairing).
+    #[serde(default)]
+    pub server_ips: Vec<String>,
     pub port: u16,
     pub secret_token: String,
     pub server_name: String,

@@ -167,12 +167,14 @@ class MainActivity : AppCompatActivity() {
                 setBackgroundColor(0xFF10B981.toInt())
                 setTextColor(0xFFFFFFFF.toInt())
                 setOnClickListener {
-                    val ip = ipInput.text.toString().trim()
+                    val ipRaw = ipInput.text.toString().trim()
                     val port = portInput.text.toString().trim().toIntOrNull() ?: 27890
-                    if (ip.isNotEmpty()) {
-                        statusText.text = "Status: Connecting to $ip:$port..."
+                    if (ipRaw.isNotEmpty()) {
+                        // Supports a single IP or comma/space separated candidate list
+                        val ipDisplay = ipRaw.split(',', ' ').firstOrNull { it.isNotBlank() } ?: ipRaw
+                        statusText.text = "Status: Connecting to $ipDisplay:$port..."
                         statusText.setTextColor(0xFFF59E0B.toInt())
-                        companionClient.connectWithQrData(ip, port, "")
+                        companionClient.connectWithQrData(ipRaw, port, "")
                         startBackgroundService()
                     } else {
                         Toast.makeText(this@MainActivity, "Please enter PC IP address", Toast.LENGTH_SHORT).show()
@@ -248,19 +250,25 @@ class MainActivity : AppCompatActivity() {
         if (result != null) {
             if (result.contents != null) {
                 val scanned = result.contents
-                // Format: notify://pair?ip=192.168.1.4&port=27890&secret=abc
+                // Format: notify://pair?ip=192.168.1.4&ips=10.0.0.5&port=27890&secret=abc
+                // "ip" is the primary LAN IP, "ips" holds alternate candidates
+                // (comma-separated) which are auto-probed when a VPN is active.
                 try {
                     val uri = Uri.parse(scanned)
-                    val ip = uri.getQueryParameter("ip")
+                    val primaryIp = uri.getQueryParameter("ip")
+                    val altIps = uri.getQueryParameter("ips")
+                        ?.split(',')?.map { it.trim() }?.filter { it.isNotBlank() }
+                        ?: emptyList()
+                    val candidateIps = listOfNotNull(primaryIp) + altIps
                     val port = uri.getQueryParameter("port")?.toIntOrNull() ?: 27890
                     val secret = uri.getQueryParameter("secret") ?: ""
 
-                    if (ip != null) {
-                        ipInput.setText(ip)
+                    if (candidateIps.isNotEmpty()) {
+                        ipInput.setText(candidateIps.joinToString(","))
                         portInput.setText(port.toString())
-                        statusText.text = "Status: QR Scanned! Connecting to $ip:$port..."
+                        statusText.text = "Status: QR Scanned! Connecting to ${candidateIps.first()}:$port..."
                         statusText.setTextColor(0xFF10B981.toInt())
-                        companionClient.connectWithQrData(ip, port, secret)
+                        companionClient.connectWithQrData(candidateIps, port, secret)
                         startBackgroundService()
                         Toast.makeText(this, "QR Code Paired! Connecting...", Toast.LENGTH_SHORT).show()
                     }
@@ -285,10 +293,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        companionClient.onDiscoveryFound = { ip, port, name ->
-            ipInput.setText(ip)
+        companionClient.onDiscoveryFound = { ips, port, name ->
+            ipInput.setText(ips.joinToString(","))
             portInput.setText(port.toString())
-            statusText.text = "Status: ● Found $name at $ip:$port! Connecting..."
+            statusText.text = "Status: ● Found $name at ${ips.first()}:$port! Connecting..."
             statusText.setTextColor(0xFF10B981.toInt())
         }
     }
