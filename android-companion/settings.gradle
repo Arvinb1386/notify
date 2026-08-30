@@ -1,19 +1,30 @@
 pluginManagement {
     repositories {
-        // Fast mirrors first — protects CI against HTTP 429 rate-limiting on
-        // the overloaded default endpoints (repo.maven.apache.org / plugins.gradle.org).
+        // Mirrors first. AGP lives ONLY on Google's Maven (dl.google.com), which is
+        // unreachable from some regions/VPNs — Aliyun proxies Google + Central + the
+        // Gradle plugin portal, and JetBrains' redirector proxies Maven Central.
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
         maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }
+        maven { url 'https://cache-redirector.jetbrains.com/dl.google.com/dl/android/maven2' }
         maven { url 'https://cache-redirector.jetbrains.com/repo.maven.apache.org/maven2' }
         google()
         mavenCentral()
         gradlePluginPortal()
     }
 }
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.10.0'
+}
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        // Fast mirrors first — protects CI against HTTP 429 rate-limiting on Maven Central.
+        // Mirrors first (see pluginManagement comment) — app dependencies resolve here.
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
         maven { url 'https://maven-central.storage-download.googleapis.com/maven2/' }
+        maven { url 'https://cache-redirector.jetbrains.com/dl.google.com/dl/android/maven2' }
         maven { url 'https://cache-redirector.jetbrains.com/repo.maven.apache.org/maven2' }
         google()
         mavenCentral()

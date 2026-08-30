@@ -74,6 +74,13 @@ impl CompanionServer {
         }
     }
 
+    /// True while a companion phone is connected over the WebSocket.
+    /// Used to suppress the parallel ADB notification pipeline (which would
+    /// otherwise deliver a second copy of every notification).
+    pub async fn has_connected_device(&self) -> bool {
+        self.connected_device.read().await.is_some()
+    }
+
     /// Re-enables accepting companion connections (e.g. when the user opens
     /// the pairing wizard or explicitly connects a device again).
     pub async fn resume(&self) {
@@ -151,14 +158,16 @@ impl CompanionServer {
             5
         };
 
-        // VirtualBox host-only adapter (192.168.56.x) — deprioritize heavily
+        // VirtualBox host-only adapter (192.168.56.x) — deprioritize to dead last.
+        // Windows renames the adapter ("Ethernet 3") so the name check often misses
+        // it; the subnet itself is the reliable signal.
         if octets[0] == 192 && octets[1] == 168 && octets[2] == 56 {
-            score -= 60;
+            score -= 90;
         }
 
         // Name-based signals
         if Self::is_vpn_or_virtual_name(name_lower) {
-            score -= 50;
+            score -= 60;
         } else {
             score += Self::physical_nic_bonus(name_lower);
         }
@@ -353,9 +362,24 @@ impl CompanionServer {
                                     break;
                                 }
                                 msg = ws_receiver.next() => {
+                                    // IMPORTANT: OkHttp keep-alive pings arrive as
+                                    // Message::Ping — they must be ignored (tungstenite
+                                    // auto-replies with Pong), never treated as a close.
                                     let text = match msg {
                                         Some(Ok(Message::Text(t))) => t,
-                                        _ => break,
+                                        Some(Ok(Message::Ping(_)))
+                                        | Some(Ok(Message::Pong(_)))
+                                        | Some(Ok(Message::Binary(_)))
+                                        | Some(Ok(Message::Frame(_))) => continue,
+                                        Some(Ok(Message::Close(frame))) => {
+                                            info!("Companion sent close frame: {:?}", frame.map(|f| f.code));
+                                            break;
+                                        }
+                                        Some(Err(e)) => {
+                                            warn!("Companion WebSocket read error: {}", e);
+                                            break;
+                                        }
+                                        None => break,
                                     };
                                     let parsed = match serde_json::from_str::<CompanionMessage>(text.as_str()) {
                                         Ok(p) => p,
@@ -430,13 +454,15 @@ impl CompanionServer {
 
                                             // Collapse chatty updates (progress bars etc.):
                                             // identical repeat payloads are dropped entirely.
+                                            // NOTE: post_time is intentionally NOT part of the
+                                            // signature — Telegram & co. bump it when they
+                                            // re-post an unchanged notification.
                                             let signature = format!(
-                                                "{}|{}|{}|{}|{}",
+                                                "{}|{}|{}|{}",
                                                 title.as_deref().unwrap_or(""),
                                                 body.as_deref().unwrap_or(""),
                                                 subtext.as_deref().unwrap_or(""),
                                                 otp_code.as_deref().unwrap_or(""),
-                                                post_time
                                             );
                                             if !crate::notifications::UpdateGate::should_forward(&key, &signature) {
                                                 continue;
@@ -487,14 +513,22 @@ impl CompanionServer {
                                             battery_temp,
                                             wifi_ssid,
                                             wifi_signal,
+                                            storage_free_gb,
+                                            storage_total_gb,
                                         } => {
+                                            let used_percent = match (storage_free_gb, storage_total_gb) {
+                                                (Some(free), Some(total)) if total > 0.0 => {
+                                                    (((total - free) / total) * 100.0).round() as u8
+                                                }
+                                                _ => 0,
+                                            };
                                             let telemetry_payload = serde_json::json!({
                                                 "battery_level": battery_level,
                                                 "battery_status": battery_status.to_lowercase(),
                                                 "battery_temp_celsius": battery_temp,
-                                                "storage_free_gb": 0.0,
-                                                "storage_total_gb": 0.0,
-                                                "storage_used_percent": 0,
+                                                "storage_free_gb": storage_free_gb.unwrap_or(0.0),
+                                                "storage_total_gb": storage_total_gb.unwrap_or(0.0),
+                                                "storage_used_percent": used_percent,
                                                 "wifi_signal_dbm": wifi_signal,
                                                 "wifi_ssid": wifi_ssid,
                                             });

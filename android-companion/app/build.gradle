@@ -5,12 +5,13 @@ plugins {
 
 android {
     namespace 'com.notify.companion'
-    compileSdk 34
+    compileSdk 36
+    buildToolsVersion "36.0.0"
 
     defaultConfig {
         applicationId "com.notify.companion"
         minSdk 24
-        targetSdk 34
+        targetSdk 36
         versionCode 1
         versionName "1.0"
     }

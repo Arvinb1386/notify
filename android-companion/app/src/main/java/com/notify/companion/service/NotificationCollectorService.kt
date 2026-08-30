@@ -1,6 +1,8 @@
 package com.notify.companion.service
 
 import android.app.Notification
+import android.content.Context
+import android.content.pm.LauncherApps
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -16,6 +18,35 @@ class NotificationCollectorService : NotificationListenerService() {
         companionClient = CompanionClient.getInstance(applicationContext)
         companionClient.startAutoConnection()
         Log.i("NotificationCollector", "Notification Listener Service Started")
+    }
+
+    /**
+     * Resolves a human-readable app label. The plain PackageManager lookup only
+     * covers the current user — apps installed in a work profile / parallel
+     * space / secure folder throw NameNotFoundException, which previously made
+     * us fall back to the raw package name (com.whatsapp instead of WhatsApp).
+     */
+    private fun resolveAppName(pkg: String, sbn: StatusBarNotification): String {
+        val pm = applicationContext.packageManager
+
+        // 1. Standard lookup (current user)
+        try {
+            val appInfo = pm.getApplicationInfo(pkg, 0)
+            val label = pm.getApplicationLabel(appInfo).toString()
+            if (label.isNotBlank()) return label
+        } catch (_: Exception) {
+        }
+
+        // 2. The notification's own user handle (work profile / parallel space)
+        try {
+            val launcherApps = getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
+            val label = launcherApps.getActivityList(pkg, sbn.user).firstOrNull()?.label?.toString()
+            if (!label.isNullOrBlank()) return label
+        } catch (_: Exception) {
+        }
+
+        Log.w("NotificationCollector", "Could not resolve app label for $pkg — falling back to package name")
+        return pkg
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -38,13 +69,7 @@ class NotificationCollectorService : NotificationListenerService() {
         val body = bigText ?: text
         if (title.isNullOrBlank() && body.isNullOrBlank()) return
 
-        val appName = try {
-            val pm = applicationContext.packageManager
-            val appInfo = pm.getApplicationInfo(pkg, 0)
-            pm.getApplicationLabel(appInfo).toString()
-        } catch (e: Exception) {
-            pkg
-        }
+        val appName = resolveAppName(pkg, sbn)
 
         val key = sbn.key ?: "${pkg}_${sbn.id}"
         val postTime = sbn.postTime

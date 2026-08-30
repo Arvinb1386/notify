@@ -75,7 +75,9 @@ sealed class CompanionMessage {
         val batteryStatus: String,
         val batteryTemp: Float,
         val wifiSsid: String?,
-        val wifiSignal: Int?
+        val wifiSignal: Int?,
+        val storageFreeGb: Double = 0.0,
+        val storageTotalGb: Double = 0.0
     ) : CompanionMessage() {
         fun toJson(): String {
             val root = JSONObject()
@@ -86,6 +88,8 @@ sealed class CompanionMessage {
             payload.put("battery_temp", batteryTemp)
             payload.put("wifi_ssid", wifiSsid ?: JSONObject.NULL)
             payload.put("wifi_signal", wifiSignal ?: JSONObject.NULL)
+            payload.put("storage_free_gb", storageFreeGb)
+            payload.put("storage_total_gb", storageTotalGb)
             root.put("payload", payload)
             return root.toString()
         }

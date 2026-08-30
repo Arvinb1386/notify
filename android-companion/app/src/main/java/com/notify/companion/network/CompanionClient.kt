@@ -1,13 +1,18 @@
 package com.notify.companion.network
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.os.BatteryManager
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.StatFs
 import android.util.Log
 import kotlinx.coroutines.*
 import okhttp3.*
@@ -101,7 +106,10 @@ class CompanionClient(private val context: Context) {
         webSocketClient = underlyingNetwork?.let { network ->
             client.newBuilder()
                 .socketFactory(network.socketFactory)
-                .dns { host -> network.getAllByName(host).toList() }
+                .dns(object : Dns {
+                    override fun lookup(hostname: String): List<InetAddress> =
+                        network.getAllByName(hostname).toList()
+                })
                 .build()
         } ?: client
     }
@@ -124,9 +132,13 @@ class CompanionClient(private val context: Context) {
     /** Guards against spawning multiple auto-reconnect loops (service restarts) */
     private var autoConnectStarted = false
 
+    /** Guards against spawning multiple telemetry loops */
+    private var telemetryLoopStarted = false
+
     var onQuickReplyReceived: ((key: String, text: String) -> Unit)? = null
     var onConnectionStateChanged: ((Boolean, String?) -> Unit)? = null
     var onDiscoveryFound: ((List<String>, Int, String) -> Unit)? = null
+    var onDiscoverySearching: (() -> Unit)? = null
 
     private val sharedPrefs = context.getSharedPreferences("notify_companion_prefs", Context.MODE_PRIVATE)
 
@@ -164,6 +176,9 @@ class CompanionClient(private val context: Context) {
     }
 
     fun triggerQuickDiscovery() {
+        // A manual search is explicit intent to connect
+        userDisconnected = false
+        mainHandler.post { onDiscoverySearching?.invoke() }
         scope.launch {
             val discovered = discoverServerViaUdp()
             if (discovered != null && discovered.ips.isNotEmpty()) {
@@ -375,6 +390,11 @@ class CompanionClient(private val context: Context) {
                         pairingToken = pairingSecret
                     )
                     sendMessage(handshake.toJson())
+
+                    // Battery/storage telemetry is owned by the client itself so it
+                    // survives service restarts / user disconnects and always resumes
+                    // as soon as the WebSocket is open.
+                    startTelemetryLoop()
                 }
 
                 override fun onMessage(ws: WebSocket, text: String) {
@@ -424,6 +444,70 @@ class CompanionClient(private val context: Context) {
         if (isConnected) {
             webSocket?.send(jsonString)
         }
+    }
+
+    // ---- Battery & Storage Telemetry ----
+
+    private fun startTelemetryLoop() {
+        if (telemetryLoopStarted) return
+        telemetryLoopStarted = true
+
+        scope.launch {
+            while (isActive) {
+                if (isConnected) {
+                    try {
+                        sendTelemetryUpdate()
+                    } catch (e: Exception) {
+                        Log.e("CompanionClient", "Telemetry error", e)
+                    }
+                }
+                delay(4000)
+            }
+        }
+    }
+
+    private fun sendTelemetryUpdate() {
+        val ifilter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        val batteryStatusIntent: Intent? = context.registerReceiver(null, ifilter)
+
+        val level: Int = batteryStatusIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale: Int = batteryStatusIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val batteryPct: Int = if (level >= 0 && scale > 0) (level * 100 / scale) else 100
+
+        val status: Int = batteryStatusIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val isCharging: Boolean =
+            status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        val statusStr = if (isCharging) "charging" else "discharging"
+
+        val tempRaw: Int = batteryStatusIntent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 250) ?: 250
+        val tempCelsius = tempRaw / 10.0f
+
+        // Internal storage stats (fixes the empty Storage widget in companion mode)
+        var freeGb = 0.0
+        var totalGb = 0.0
+        try {
+            val stat = StatFs(Environment.getDataDirectory().path)
+            totalGb = stat.totalBytes / (1024.0 * 1024.0 * 1024.0)
+            freeGb = stat.availableBytes / (1024.0 * 1024.0 * 1024.0)
+        } catch (_: Exception) {}
+
+        val telemetry = CompanionMessage.Telemetry(
+            batteryLevel = batteryPct,
+            batteryStatus = statusStr,
+            batteryTemp = tempCelsius,
+            wifiSsid = null, // Wi-Fi SSID requires location permission; the PC shows a fallback
+            wifiSignal = null,
+            storageFreeGb = freeGb,
+            storageTotalGb = totalGb
+        )
+
+        Log.d("CompanionClient", "Sending telemetry: battery=$batteryPct% ($statusStr), storage ${"%.1f".format(freeGb)}/${"%.1f".format(totalGb)}GB")
+        sendMessage(telemetry.toJson())
+    }
+
+    /** Re-enables the auto-connect loop after a manual disconnect (e.g. app relaunch) */
+    fun clearUserDisconnect() {
+        userDisconnected = false
     }
 
     private fun getOrCreateDeviceId(): String {

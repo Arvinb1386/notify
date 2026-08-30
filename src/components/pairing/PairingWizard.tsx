@@ -226,7 +226,7 @@ export const PairingWizard: React.FC = () => {
                   <span>IP: {primaryIp || 'Loading...'} • Port: {qrData?.port || 27890}</span>
                   {alternates.length > 0 && (
                     <span className="text-[10px] text-gray-500">
-                      Alt: {alternates.join(', ')} (auto-probed on VPN)
+                      Backup IPs (only auto-probed if the primary is unreachable): {alternates.join(', ')}
                     </span>
                   )}
                 </div>

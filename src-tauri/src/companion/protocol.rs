@@ -36,6 +36,11 @@ pub enum CompanionMessage {
         battery_temp: f32,
         wifi_ssid: Option<String>,
         wifi_signal: Option<i32>,
+        /// Real storage stats (newer companion APKs); old APKs omit them
+        #[serde(default)]
+        storage_free_gb: Option<f64>,
+        #[serde(default)]
+        storage_total_gb: Option<f64>,
     },
     #[serde(rename = "clipboard")]
     Clipboard {

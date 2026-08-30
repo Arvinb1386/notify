@@ -297,16 +297,24 @@ pub fn run() {
             let mut notif_rx = notif_engine.subscribe();
             let handle_notif = app_handle.clone();
             let db_ref = Arc::clone(&database);
+            let companion_for_forwarder = Arc::clone(&companion_server);
             tauri::async_runtime::spawn(async move {
                 while let Ok(item) = notif_rx.recv().await {
+                    // If the companion app is connected, it already delivers every
+                    // notification — skip the ADB pipeline to avoid duplicates.
+                    if companion_for_forwarder.has_connected_device().await {
+                        continue;
+                    }
+
                     // Collapse chatty updates (download progress etc.):
                     // identical repeat payloads are dropped entirely.
+                    // NOTE: post_time is intentionally NOT part of the signature —
+                    // apps bump it when re-posting an unchanged notification.
                     let signature = format!(
-                        "{}|{}|{}|{}",
+                        "{}|{}|{}",
                         item.title.as_deref().unwrap_or(""),
                         item.body.as_deref().unwrap_or(""),
-                        item.subtext.as_deref().unwrap_or(""),
-                        item.post_time
+                        item.subtext.as_deref().unwrap_or("")
                     );
 
                     if item.status == notifications::NotificationStatus::Removed {
