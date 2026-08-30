@@ -20,7 +20,7 @@ The project is designed for people who want to read and manage phone notificatio
 - [Desktop Development](#desktop-development)
 - [Android Companion Setup](#android-companion-setup)
 - [Pairing and Connection](#pairing-and-connection)
-- [Building the APK](#building-the-apk)
+- [GitHub Releases](#github-releases)
 - [Building the Desktop Application](#building-the-desktop-application)
 - [Configuration and Ports](#configuration-and-ports)
 - [Privacy and Security](#privacy-and-security)
@@ -136,7 +136,7 @@ Install:
 - Android SDK Platform 36.
 - Android Build Tools `36.0.0`.
 - JDK 17.
-- Gradle 8.13, or use the compatible Gradle installation configured for the project.
+- Android Studio's Gradle integration or a compatible Gradle installation.
 - An Android device running Android 7.0/API 24 or newer.
 
 The Android module currently declares:
@@ -240,14 +240,11 @@ Some commands may require additional platform dependencies or may take time on t
 
 ## Android Companion Setup
 
-### Using Android Studio
+End users should download the ready-made APK from [GitHub Releases](#github-releases). The source setup below is intended for contributors and developers.
 
-1. Open the `android-companion` directory in Android Studio.
-2. Confirm that Android Studio detects the Android application module.
-3. Set the Android SDK location in `local.properties` if Android Studio does not detect it automatically.
-4. Select a physical phone or emulator.
-5. Run the `app` configuration.
-6. On the phone, open Notify Companion.
+### Installing from GitHub Releases
+
+Download the latest Android APK from the repository's GitHub Releases page, install it on the phone, and open Notify Companion. Developers who need to work on the Android source can open `android-companion` in Android Studio.
 
 ### Required Android permissions
 
@@ -310,63 +307,85 @@ The mobile **Disconnect from PC** action stops the active connection and prevent
 
 ---
 
-## Building the APK
+## GitHub Releases
 
-The project currently contains generated Gradle output and a local Gradle distribution may already be available on a development machine. Use the Gradle executable available in your environment.
+Ready-to-use Android APK files should be published through the repository's **GitHub Releases** page rather than documented as a local build requirement for users.
 
-### Debug APK
+### Downloading Notify
 
-From `android-companion`:
+1. Open the repository on GitHub.
+2. Select **Releases** on the right side of the repository page.
+3. Open the latest release.
+4. Download the APK that matches the device architecture, or download the universal APK when available.
+5. On Android, allow installation from the browser/file manager if Android asks for permission.
+6. Install or update Notify Companion, then follow the pairing instructions above.
 
-```bash
-gradle :app:assembleDebug
-```
+Only download release files from the official repository. Verify the release notes and checksum when one is provided.
 
-On Windows, if `gradle` is not on `PATH`, use the Gradle executable installed by Android Studio/Gradle locally, or open the project in Android Studio and run **Build > Make Project**.
+### Recommended release assets
 
-The output is normally:
+Use clear names such as:
 
 ```text
-android-companion/app/build/outputs/apk/debug/app-debug.apk
+Notify-Companion-v0.1.0-universal.apk
+Notify-Companion-v0.1.0-arm64-v8a.apk
+Notify-Companion-v0.1.0-armeabi-v7a.apk
+Notify-Companion-v0.1.0-x86.apk
+Notify-Companion-v0.1.0-x86_64.apk
+Notify-Desktop-v0.1.0-Setup.exe
 ```
 
-### Install the debug APK with Android Studio or ADB
+Android APK architecture support depends on the native libraries included in the application. This project currently has no native Android library that requires separate ABI APKs, so a single universal APK is normally the simplest and most compatible release asset. If ABI-specific APKs are added later, publish them alongside a universal APK and explain which one users should choose.
 
-If ADB is installed and the device is authorized:
+### Uploading files manually
+
+1. Build and test the artifacts locally or with CI.
+2. Create a GitHub release from **Releases > Draft a new release**.
+3. Create a version tag such as `v0.1.0`.
+4. Add release title and notes.
+5. Drag the APK and Windows installer into the assets area.
+6. Publish the release.
+7. Add the release URL to the project description or documentation.
+
+Do not upload debug-only or unsigned production files as official releases. Keep signing keys private and never commit them to GitHub.
+
+### Uploading with GitHub CLI
+
+After installing and authenticating the GitHub CLI:
 
 ```bash
-adb install -r android-companion/app/build/outputs/apk/debug/app-debug.apk
+gh auth login
+gh release create v0.1.0 \\
+  android-companion/app/build/outputs/apk/release/app-release.apk \\
+  src-tauri/target/release/bundle/nsis/Notify_0.1.0_x64-setup.exe \\
+  --title "Notify v0.1.0" \\
+  --generate-notes
 ```
 
-If more than one device is connected:
-
-```bash
-adb devices
-adb -s <device-serial> install -r android-companion/app/build/outputs/apk/debug/app-debug.apk
-```
-
-> ADB is used here only to install/debug the APK. Normal notification synchronization does not require ADB.
-
-### Release APK
-
-Before distributing a release APK, configure a release signing key and review:
-
-- `applicationId`.
-- Version code and version name.
-- ProGuard/R8 settings.
-- Network security requirements.
-- Pairing-secret lifecycle.
-- Android foreground-service behavior.
-
-Then build:
-
-```bash
-gradle :app:assembleRelease
-```
-
-Do not distribute an unsigned or debug-signed APK as a production release.
+Replace the paths with the actual generated artifact paths. This command creates the tag/release and uploads the files; run it only after reviewing the binaries.
 
 ---
+
+## Desktop Installer
+
+For Windows, Tauri normally produces an installer such as an NSIS `.exe` setup file. The desktop build should be run on Windows, or in a Windows CI runner, because Tauri packages platform-specific installers.
+
+Typical output paths after a successful Tauri build include:
+
+```text
+src-tauri/target/release/bundle/nsis/*-setup.exe
+src-tauri/target/release/bundle/msi/*.msi
+```
+
+The exact filename includes the product version and architecture. The configured Windows bundle targets all enabled formats, so you may receive both an NSIS setup executable and an MSI package.
+
+Recommended release assets:
+
+- `Notify-Desktop-v0.1.0-x64-setup.exe` for most modern 64-bit Windows PCs.
+- `Notify-Desktop-v0.1.0-x64.msi` for managed/enterprise installation.
+- An ARM64 installer only when the build is produced on/configured for Windows ARM64.
+
+Windows architecture is determined by the runner/toolchain used to build Tauri. A Windows x64 build does not automatically create ARM64 or x86 installers. To publish multiple desktop architectures, run separate builds on matching CI runners/toolchains and upload each resulting installer to the same GitHub release.
 
 ## Building the Desktop Application
 
@@ -376,6 +395,8 @@ After installing the prerequisites:
 npm install
 npm run tauri build
 ```
+
+For a normal Windows x64 release, run the command on a 64-bit Windows runner. The generated `.exe` setup file can then be uploaded to GitHub Releases as described above.
 
 Tauri places platform-specific bundles under the generated build directories. The exact installer format depends on the operating system and Tauri bundle configuration.
 
@@ -726,9 +747,9 @@ npm run dev
 npm run build
 ```
 
-### ۵. ساخت و نصب برنامه اندروید
+### ۵. نصب برنامه اندروید
 
-پوشه `android-companion` را در Android Studio باز کنید، SDK را تنظیم کنید و برنامه `app` را روی گوشی اجرا کنید؛ یا از دستور Gradle بخش بعد استفاده کنید.
+آخرین APK را از صفحه Releases مخزن GitHub دانلود و روی گوشی نصب کنید، سپس Notify Companion را باز کنید. توسعه‌دهندگان می‌توانند برای تغییر کد، پوشه `android-companion` را در Android Studio باز کنند.
 
 ### ۶. جفت‌سازی
 
@@ -771,37 +792,66 @@ npm run build
 
 ---
 
-## ساخت APK
+## انتشار APK در GitHub Releases
 
-از پوشه `android-companion` اجرا کنید:
+کاربران باید APK آماده را از بخش **Releases** مخزن GitHub دریافت کنند و نیازی به build محلی ندارند.
 
-```bash
-gradle :app:assembleDebug
-```
+### دریافت و نصب
 
-اگر در ویندوز دستور `gradle` پیدا نشد، از Gradle نصب‌شده در سیستم یا Android Studio استفاده کنید.
+1. وارد صفحه مخزن رسمی در GitHub شوید.
+2. روی **Releases** بزنید.
+3. آخرین release را باز کنید.
+4. APK مناسب معماری گوشی یا نسخه universal را دانلود کنید.
+5. در صورت درخواست اندروید، اجازه نصب از browser یا file manager را فعال کنید.
+6. برنامه را نصب کنید و مراحل جفت‌سازی را انجام دهید.
 
-مسیر معمول APK:
+### نام‌گذاری پیشنهادی فایل‌ها
 
 ```text
-android-companion/app/build/outputs/apk/debug/app-debug.apk
+Notify-Companion-v0.1.0-universal.apk
+Notify-Companion-v0.1.0-arm64-v8a.apk
+Notify-Companion-v0.1.0-armeabi-v7a.apk
+Notify-Companion-v0.1.0-x86.apk
+Notify-Companion-v0.1.0-x86_64.apk
+Notify-Desktop-v0.1.0-Setup.exe
 ```
 
-نصب با ADB در صورت اتصال و مجوز داشتن گوشی:
+این پروژه در حال حاضر کتابخانه native اندرویدی جداگانه‌ای ندارد؛ بنابراین یک APK universal معمولاً ساده‌ترین و سازگارترین گزینه است. اگر بعداً ABIهای جداگانه ساخته شد، نسخه universal و نسخه‌های architecture-specific را هم‌زمان در release قرار دهید.
+
+### بارگذاری در GitHub
+
+از **Releases > Draft a new release** یک tag مثل `v0.1.0` بسازید، فایل‌های APK و installer ویندوز را در بخش Assets بکشید و release را منتشر کنید. همچنین می‌توانید از GitHub CLI استفاده کنید:
 
 ```bash
-adb install -r android-companion/app/build/outputs/apk/debug/app-debug.apk
+gh auth login
+gh release create v0.1.0 \\
+  path/to/Notify-Companion-v0.1.0-universal.apk \\
+  path/to/Notify-Desktop-v0.1.0-x64-setup.exe \\
+  --title "Notify v0.1.0" \\
+  --generate-notes
 ```
 
-برای نسخه release:
+کلید امضای APK و فایل‌های debug را در GitHub عمومی نکنید.
+
+---
+
+## ساخت installer دسکتاپ
+
+برای ساخت setup ویندوز، build را روی ویندوز یا runner ویندوز اجرا کنید:
 
 ```bash
-gradle :app:assembleRelease
+npm install
+npm run tauri build
 ```
 
-قبل از انتشار عمومی باید کلید امضای release، version code، version name، تنظیمات R8/ProGuard و امنیت ارتباط بررسی شوند. APK debug را برای انتشار عمومی استفاده نکنید.
+مسیرهای معمول خروجی:
 
-> ADB در این بخش فقط برای نصب و اشکال‌زدایی استفاده شده است؛ همگام‌سازی عادی اعلان‌ها به ADB نیاز ندارد.
+```text
+src-tauri/target/release/bundle/nsis/*-setup.exe
+src-tauri/target/release/bundle/msi/*.msi
+```
+
+برای بیشتر کامپیوترهای امروزی ویندوز، فایل x64 مناسب است. ساخت x86 یا ARM64 باید با toolchain/runner همان معماری انجام شود و به صورت خودکار از یک build x64 تولید نمی‌شود. فایل‌های معماری‌های مختلف را می‌توان در یک GitHub Release قرار داد.
 
 ---
 
